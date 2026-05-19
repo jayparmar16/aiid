@@ -22,7 +22,7 @@ from src.export_excel import export_excel
 
 def parse_args() -> argparse.Namespace:
     """Parse CLI args for local runs and GitHub Actions."""
-    parser = argparse.ArgumentParser(description="Build AIID master dataset from latest snapshot.")
+    parser = argparse.ArgumentParser(description="Build AIID annotated dataset from latest snapshot.")
     parser.add_argument(
         "--config",
         default=str(Path(__file__).with_name("config.yaml")),
@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
-    """Run the end-to-end master dataset pipeline.
+    """Run the end-to-end annotated dataset pipeline.
 
     Exit codes:
       0 = success
@@ -50,7 +50,7 @@ def main() -> int:
     # Load YAML config with optional env var overrides (CI-friendly).
     config = load_config(config_path)
 
-    print("Starting master dataset pipeline")
+    print("Starting annotated dataset pipeline")
     print(f"Config: {config_path}")
 
     # Download the latest public snapshot and locate required CSV inputs.

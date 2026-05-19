@@ -52,7 +52,7 @@ class OutputConfig:
 
 @dataclass
 class PipelineConfig:
-    """Top-level configuration for the master dataset build pipeline."""
+    """Top-level configuration for the annotated dataset build pipeline."""
 
     paths: PathsConfig
     snapshot: SnapshotConfig
