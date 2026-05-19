@@ -12,7 +12,7 @@ def build_master(
     cset: pd.DataFrame,
     config: PipelineConfig,
 ) -> pd.DataFrame:
-    """Left-join taxonomy tables onto the incident data to form the master dataset."""
+    """Left-join taxonomy tables onto the incident data to form the annotated dataset."""
 
     # Keep a stable core subset to prevent join drift.
     inc_core = inc[

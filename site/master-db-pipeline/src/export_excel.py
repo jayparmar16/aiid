@@ -25,9 +25,9 @@ def _col_group(column: str) -> str:
     return "cset"
 
 
-def _write_master_sheet(wb: Workbook, df: pd.DataFrame) -> None:
-    """Write the main 'Master Dataset' worksheet with grouped headers and styling."""
-    ws = wb.create_sheet("Master Dataset")
+def _write_annotated_sheet(wb: Workbook, df: pd.DataFrame) -> None:
+    """Write the main 'Annotated Dataset' worksheet with grouped headers and styling."""
+    ws = wb.create_sheet("Annotated Dataset")
     cols = df.columns.tolist()
     n = len(cols)
 
@@ -60,7 +60,7 @@ def _write_master_sheet(wb: Workbook, df: pd.DataFrame) -> None:
     title_cell = ws.cell(
         row=1,
         column=1,
-        value=f"AI Incident Database - Master Dataset | {len(df):,} incidents | {n} columns",
+        value=f"AI Incident Database - Annotated Dataset | {len(df):,} incidents | {n} columns",
     )
     title_cell.font = Font(name="Arial", bold=True, size=11, color="FFFFFF")
     title_cell.fill = PatternFill("solid", fgColor="0D1B2A")
@@ -142,7 +142,7 @@ def _write_dictionary_sheet(wb: Workbook, df: pd.DataFrame) -> None:
     """Write a 'Data Dictionary' worksheet with fill rates and brief descriptions."""
     ws = wb.create_sheet("Data Dictionary")
     ws.merge_cells("A1:E1")
-    title = ws.cell(row=1, column=1, value="Data Dictionary - AI Incident Database Master Dataset")
+    title = ws.cell(row=1, column=1, value="Data Dictionary - AI Incident Database Annotated Dataset")
     title.font = Font(name="Arial", bold=True, size=12, color="FFFFFF")
     title.fill = PatternFill("solid", fgColor="0D1B2A")
     title.alignment = Alignment(horizontal="left", vertical="center")
@@ -310,14 +310,14 @@ def _write_coverage_sheet(wb: Workbook, df: pd.DataFrame) -> None:
 
 
 def export_excel(master: pd.DataFrame, output_path: Path) -> None:
-    """Export the master dataset to a styled Excel workbook (three sheets)."""
+    """Export the annotated dataset to a styled Excel workbook (three sheets)."""
     # Ensure the target directory exists for local runs and CI.
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     wb = Workbook()
     wb.remove(wb.active)
 
-    _write_master_sheet(wb, master)
+    _write_annotated_sheet(wb, master)
     _write_dictionary_sheet(wb, master)
     _write_coverage_sheet(wb, master)
 

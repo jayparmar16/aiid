@@ -1,6 +1,6 @@
 paths:
   snapshot_dir: ./data/snapshots
-  output_path: ./output/AIID_Master_Dataset.xlsx
+  output_path: ./output/AIID_Annotated_Dataset.xlsx
 
 snapshot:
   base_url: https://incidentdatabase.ai
