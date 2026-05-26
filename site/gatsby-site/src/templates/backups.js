@@ -81,7 +81,8 @@ const Backups = ({ pageContext }) => {
             Weekly point-in-time dumps of the full database, available in JSON, MongoDB archive, and
             CSV formats. Please <LocalizedLink to="/contact">contact us</LocalizedLink> to let us
             know what you are using the database for so we can list your work and ensure your use
-            case is not dropped from support.
+            case is not dropped from support. Best for developers and researchers building on the
+            raw database.
           </p>
           <ul className="pl-8 leading-6 order-3 md:order-5" data-cy="snapshots-list">
             {backups
@@ -103,7 +104,8 @@ const Backups = ({ pageContext }) => {
           <p className="order-5 md:order-4">
             A curated Excel file, updated weekly, that combines all incident records with their
             taxonomy classifications (CSETv0, CSETv1, GMF, MIT). Suitable for analysis and research;
-            updated every Monday.
+            updated every Monday. No coding required — download and open directly in Excel or Google
+            Sheets.
           </p>
           <div className="order-6 md:order-6">
             {annotatedDatasets && annotatedDatasets.length > 0 ? (
