@@ -35,7 +35,7 @@ const createBackupsPage = async (_, createPage) => {
       .sort((a, b) => (a.Key < b.Key ? 1 : a.Key > b.Key ? -1 : 0));
 
     const backups = allObjects
-      .filter((obj) => !obj.Key.startsWith('AIID_Annotated_Dataset-'))
+      .filter((obj) => obj.Key.startsWith('backup-'))
       .sort((a, b) => (a.Key < b.Key ? 1 : a.Key > b.Key ? -1 : 0));
 
     createSnapshotsPage(createPage, backups, annotatedDatasets);
