@@ -57,6 +57,7 @@ const createLandingPage = async (graphql, createPage) => {
                 link {
                   url
                 }
+                direct_link
               }
             }
           }
