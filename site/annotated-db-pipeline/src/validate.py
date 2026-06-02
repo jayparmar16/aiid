@@ -19,7 +19,7 @@ class ValidationResult:
         return len(self.errors) == 0
 
 
-def validate_master(master: pd.DataFrame, inc_core: pd.DataFrame, config: PipelineConfig) -> ValidationResult:
+def validate_annotated(annotated: pd.DataFrame, inc_core: pd.DataFrame, config: PipelineConfig) -> ValidationResult:
     """Validate row counts, uniqueness, completeness, and basic coverage guardrails."""
     errors: list[str] = []
     warnings: list[str] = []
@@ -35,12 +35,12 @@ def validate_master(master: pd.DataFrame, inc_core: pd.DataFrame, config: Pipeli
 
     # Minimum size guardrail.
     _check(
-        len(master) >= config.validation.expected_min_incidents,
-        f"Row count {len(master)} is below expected minimum {config.validation.expected_min_incidents}",
+        len(annotated) >= config.validation.expected_min_incidents,
+        f"Row count {len(annotated)} is below expected minimum {config.validation.expected_min_incidents}",
     )
 
     # Primary key should remain unique after joins.
-    dupes = master["Incident ID"].duplicated().sum()
+    dupes = annotated["Incident ID"].duplicated().sum()
     _check(dupes == 0, f"Found {dupes} duplicate Incident IDs")
 
     core_cols = [
@@ -56,11 +56,11 @@ def validate_master(master: pd.DataFrame, inc_core: pd.DataFrame, config: Pipeli
         "Data Sources",
     ]
     for col in core_cols:
-        nulls = master[col].isnull().sum()
+        nulls = annotated[col].isnull().sum()
         _check(nulls == 0, f"{col} has {nulls} nulls (should be 0)")
 
     # MIT coverage is expected to remain above a typical baseline.
-    mit_pct = master["Risk Domain"].notna().mean() * 100
+    mit_pct = annotated["Risk Domain"].notna().mean() * 100
     _check(
         mit_pct >= config.validation.expected_mit_coverage,
         f"MIT coverage {mit_pct:.1f}% is below expected {config.validation.expected_mit_coverage}%",
@@ -68,7 +68,7 @@ def validate_master(master: pd.DataFrame, inc_core: pd.DataFrame, config: Pipeli
     )
 
     # Soft sanity check on time range.
-    yr_min, yr_max = master["year"].min(), master["year"].max()
+    yr_min, yr_max = annotated["year"].min(), annotated["year"].max()
     _check(
         yr_min >= 1980 and yr_max >= 2024,
         f"Unexpected year range: {yr_min} -> {yr_max}",
@@ -77,8 +77,8 @@ def validate_master(master: pd.DataFrame, inc_core: pd.DataFrame, config: Pipeli
 
     # Ensure joins did not increase row count (should stay 1 row per incident).
     _check(
-        len(master) == len(inc_core),
-        f"Row explosion: master has {len(master)} rows but incidents has {len(inc_core)}",
+        len(annotated) == len(inc_core),
+        f"Row explosion: annotated dataset has {len(annotated)} rows but incidents has {len(inc_core)}",
     )
 
     return ValidationResult(errors=errors, warnings=warnings)

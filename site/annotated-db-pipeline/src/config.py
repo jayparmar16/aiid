@@ -47,7 +47,7 @@ class ValidationConfig:
 class OutputConfig:
     """Excel output shape preferences."""
 
-    master_column_order: List[str]
+    column_order: List[str]
 
 
 @dataclass
@@ -119,7 +119,7 @@ def load_config(path: Path) -> PipelineConfig:
         expected_mit_coverage=float(raw["validation"]["expected_mit_coverage"]),
     )
     output = OutputConfig(
-        master_column_order=list(raw["output"]["master_column_order"]),
+        column_order=list(raw["output"]["column_order"]),
     )
 
     return PipelineConfig(

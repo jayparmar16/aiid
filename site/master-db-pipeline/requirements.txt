@@ -1,7 +1,0 @@
-beautifulsoup4
-lxml
-openpyxl
-pandas
-pydantic
-pyyaml
-requests

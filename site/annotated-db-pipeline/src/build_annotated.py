@@ -5,7 +5,7 @@ import pandas as pd
 from .config import PipelineConfig
 
 
-def build_master(
+def build_annotated(
     inc: pd.DataFrame,
     mit: pd.DataFrame,
     gmf: pd.DataFrame,
@@ -51,18 +51,18 @@ def build_master(
     mit_join = mit[
         ["Incident ID", "Risk Domain", "Risk Subdomain", "Responsible Entity", "Intent", "Timing"]
     ]
-    master = inc_core.merge(mit_join, on="Incident ID", how="left")
+    annotated = inc_core.merge(mit_join, on="Incident ID", how="left")
 
     gmf_join = gmf[["Incident ID", "AI Goal", "AI Technology", "Technical Failure"]]
-    master = master.merge(gmf_join, on="Incident ID", how="left")
+    annotated = annotated.merge(gmf_join, on="Incident ID", how="left")
 
     cset_join = ["Incident ID"] + [c for c in cset.columns if c != "Incident ID"]
-    master = master.merge(cset[cset_join], on="Incident ID", how="left")
+    annotated = annotated.merge(cset[cset_join], on="Incident ID", how="left")
 
-    master = master.sort_values("Incident ID").reset_index(drop=True)
-    
-    ordered = [c for c in config.output.master_column_order if c in master.columns]
-    extra = [c for c in master.columns if c not in ordered]
-    master = master[ordered + extra]
+    annotated = annotated.sort_values("Incident ID").reset_index(drop=True)
 
-    return master
+    ordered = [c for c in config.output.column_order if c in annotated.columns]
+    extra = [c for c in annotated.columns if c not in ordered]
+    annotated = annotated[ordered + extra]
+
+    return annotated

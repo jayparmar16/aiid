@@ -15,8 +15,8 @@ from src.clean import (
     clean_gmf,
     clean_cset,
 )
-from src.build_master import build_master
-from src.validate import validate_master
+from src.build_annotated import build_annotated
+from src.validate import validate_annotated
 from src.export_excel import export_excel
 
 
@@ -80,7 +80,7 @@ def main() -> int:
     cset = clean_cset(raw.cset, config, dup_ids)
 
     # Left-join taxonomies onto incidents (1 row per incident).
-    master = build_master(inc, mit, gmf, cset, config)
+    annotated = build_annotated(inc, mit, gmf, cset, config)
 
     # Keep the incident spine for join/row-count guardrails.
     inc_core = inc[
@@ -98,7 +98,7 @@ def main() -> int:
     ].copy()
 
     # Validate dataset completeness/uniqueness and basic coverage expectations.
-    validation = validate_master(master, inc_core, config)
+    validation = validate_annotated(annotated, inc_core, config)
     if not validation.ok:
         print("Validation failed:")
         for error in validation.errors:
@@ -115,9 +115,9 @@ def main() -> int:
             print(f"  - {warning}")
 
     # Export to Excel (artifact path is typically set via OUTPUT_PATH in CI).
-    export_excel(master, config.paths.output_path)
+    export_excel(annotated, config.paths.output_path)
     print(f"Excel written to {config.paths.output_path}")
-    print(f"Rows: {len(master)} Columns: {len(master.columns)}")
+    print(f"Rows: {len(annotated)} Columns: {len(annotated.columns)}")
 
     return 0
 

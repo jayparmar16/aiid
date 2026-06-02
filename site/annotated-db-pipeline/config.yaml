@@ -74,7 +74,7 @@ validation:
   expected_mit_coverage: 85.0
 
 output:
-  master_column_order:
+  column_order:
     - Incident ID
     - date
     - year
