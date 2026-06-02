@@ -270,11 +270,6 @@ export const query = graphql`
         incident_id
         title
         description
-        editors {
-          userId
-          first_name
-          last_name
-        }
         date
         Alleged_deployer_of_AI_system
         Alleged_developer_of_AI_system
@@ -298,17 +293,12 @@ export const query = graphql`
         reports {
           report_number
           title
-          url
           authors
-          date_downloaded
           date_modified
           date_published
           date_submitted
-          description
           flag
-          image_url
           language
-          source_domain
           submitters
           is_incident_report
         }
@@ -322,17 +312,12 @@ export const query = graphql`
       nodes {
         report_number
         title
-        url
         authors
-        date_downloaded
         date_modified
         date_published
         date_submitted
-        description
         flag
-        image_url
         language
-        source_domain
         submitters
         is_incident_report
       }
