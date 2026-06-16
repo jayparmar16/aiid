@@ -96,6 +96,66 @@ If a taxonomy requires custom formatting beyond basic column renaming (e.g., con
    ```
 
 ---
+### Handle Upstream Schema Changes
+
+`config.yaml` mappings follow the pattern `bson_field_name: Output Column Name`. The **left side
+(key) is what the BSON contains**; the **right side (value) is what appears in the Excel output**.
+Keep this distinction in mind for every scenario below.
+
+#### A field was renamed in `incidents.bson`, `reports.bson`, or `entities.bson`
+
+The schema check will exit with code `2`, reporting the old name as missing and the new name as a
+new column. Fix: update only the **key** in `config.yaml` to match the new BSON field name. The
+value (output column name) stays the same, so nothing else in the pipeline needs to change.
+
+```yaml
+# Before
+columns:
+  incidents:
+    incident_id: Incident ID
+
+# After (BSON renamed incident_id -> incidentId)
+columns:
+  incidents:
+    incidentId: Incident ID
+```
+
+#### A `short_name` was renamed inside `classifications.bson`
+
+Taxonomy attributes are stored as an array of `{short_name, value_json}` pairs. The `short_name`
+is the key in the `taxonomies.*.mapping` block. Update it the same way — change only the key,
+keep the value.
+
+```yaml
+# Before
+taxonomies:
+  GMF:
+    mapping:
+      Known AI Goal: AI Goal
+
+# After (short_name changed upstream to AI_Goal)
+taxonomies:
+  GMF:
+    mapping:
+      AI_Goal: AI Goal
+```
+
+#### A new field appeared in a core BSON collection
+
+New fields are silently dropped — the pipeline only keeps columns present in the mapping. The
+schema check will print a notice but will not fail. To include the new field in the output:
+
+1. Add the mapping to the relevant section (`columns.incidents`, `columns.reports`, or
+   `columns.entities`).
+2. Add the output column name to the matching `output.*_column_order` list in the position you
+   want. Columns not listed there appear after all listed columns.
+3. Optionally add the output name to a group under `styles` for header colouring.
+
+#### A new attribute appeared in a taxonomy namespace
+
+Same as above: silently dropped unless added to `taxonomies.*.mapping`. Add it there, then add the
+output name to `output.column_order`.
+
 
 ## 4. Testing / Validating Your Changes
 
@@ -112,7 +172,10 @@ There is no automated test suite — run the pipeline end-to-end to validate cha
 ## 5. Troubleshooting
 
 - **`Schema check failed. Missing columns:`**
-  A mapped field was not found in the database dump. Ensure the upstream MongoDB schema has not dropped or renamed the field. Remove deprecated fields from `config.yaml`.
+  A mapped key was not found in the upstream BSON. Either the field was renamed or dropped. If
+  renamed, update the key (left side) in `config.yaml` to the new field name — see
+  [Handle Upstream Schema Changes](#handle-upstream-schema-changes). If dropped, remove that key
+  from `config.yaml` entirely.
   
 - **`ValueError: The file ... is 0 bytes`**
   The backup archive is corrupted or the database export failed upstream. Verify the snapshot hosted on Cloudflare R2.
