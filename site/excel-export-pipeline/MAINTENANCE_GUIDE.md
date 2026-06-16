@@ -1,6 +1,6 @@
 # Pipeline Maintenance Guide
 
-This pipeline utilizes a **Metadata-Driven Architecture**. Configuration rules for data extraction, flattening, and Excel formatting are defined entirely in `config.yaml`. Avoid modifying Python code for routine schema updates or aesthetic changes.
+Configuration rules for data extraction, flattening, and Excel formatting are defined entirely in `config.yaml`.
 
 > **Related docs:** [README](README.md) — overview, how to run, CI/CD, and the output workbook's sheets/columns.
 
@@ -13,22 +13,22 @@ per collection. The `config.yaml` mappings (below) map *from* the raw keys descr
 
 ### Core collections
 
-- **`incidents.bson` (the spine)** — one document per unique AI incident (~1,500 records). Core
+- **`incidents.bson`** — one document per unique AI incident (~1,500 records). Core
   identity fields (`incident_id`, `title`, `description`, `date`), lists of involved parties
   (`Alleged deployer of AI system`, `Alleged developer of AI system`,
   `Alleged harmed or nearly harmed parties`), plus metadata: NLP similarity scores, TSNE coordinates,
   embeddings, editors, and arrays mapping the incident to its reports.
-- **`reports.bson` (the sources)** — one document per source article (~7,100 records):
+- **`reports.bson`** — one document per source article (~7,100 records):
   `report_number`, `title`, `url`, `source_domain`, publication dates, authors, submitters, the full
   scraped `text`, and `tags`. Many-to-one with incidents.
-- **`entities.bson` (the actors)** — one document per recognized entity — companies, organizations,
+- **`entities.bson`** — one document per recognized entity — companies, organizations,
   individuals (~6,300 records): `entity_id`, `name`, modification timestamps.
-- **`duplicates.bson` (dedup mapping)** — key-value pairs mapping a `duplicate_incident_number` to its
+- **`duplicates.bson`** — key-value pairs mapping a `duplicate_incident_number` to its
   `true_incident_number`, used to filter deprecated incident IDs out of the final dataset.
 
 ### The taxonomies collection
 
-- **`classifications.bson` (the annotations)** — each document is a set of classifications applied to
+- **`classifications.bson`** — each document is a set of classifications applied to
   an incident (or report) under a specific **namespace** (taxonomy). Values are not flat columns:
   they are stored as an array of `attributes`, each with a `short_name` (field name) and `value_json`
   (the value). Namespaces:
