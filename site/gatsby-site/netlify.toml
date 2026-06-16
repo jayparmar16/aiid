@@ -1,9 +1,0 @@
-[build]
-  publish = "public"
-  functions = "netlify/functions"
-
-[dev]
-  command = "gatsby develop -H 127.0.0.1 -p 7999"
-  targetPort = 7999
-  port = 8000
-  autoLaunch = false
