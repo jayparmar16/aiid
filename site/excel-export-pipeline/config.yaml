@@ -42,7 +42,8 @@ columns:
 
 taxonomies:
   MIT:
-    color: "27AE60"
+    color: "1A6B3C"
+    band_label: "RISK CLASSIFICATION - MIT"
     mapping:
       Incident ID: Incident ID
       Risk Domain: Risk Domain
@@ -51,14 +52,16 @@ taxonomies:
       Timing: Timing
       Intent: Intent
   GMF:
-    color: "A0522D"
+    color: "7B3F00"
+    band_label: "TECHNICAL ANALYSIS - GMF"
     mapping:
       Incident ID: Incident ID
       Known AI Goal: AI Goal
       Known AI Technology: AI Technology
       Known AI Technical Failure: Technical Failure
   CSETv1:
-    color: "8E44AD"
+    color: "4A235A"
+    band_label: "POLICY DETAIL - CSETv1"
     mapping:
       Incident ID: Incident ID
       Harm Domain: Harm Domain
@@ -99,7 +102,8 @@ taxonomies:
 
 styles:
   Identity:
-    color: "2C3E50"
+    color: "1F3864"
+    band_label: "INCIDENT IDENTITY (incidents.csv - 100% complete)"
     columns:
       - Incident ID
       - date
@@ -114,7 +118,8 @@ styles:
       - Date Modified
       - Editor Notes
   Coverage:
-    color: "7F8C8D"
+    color: "2E4057"
+    band_label: "COVERAGE (derived)"
     columns:
       - Data Sources
       - report_count

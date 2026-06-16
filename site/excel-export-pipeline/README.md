@@ -84,11 +84,11 @@ A recent run produced **1,515 incidents** (×57 columns), **7,174 reports**, and
 
 | Sheet | What it holds |
 |---|---|
-| **Incidents** | The master table — one row per incident, columns grouped and color-coded by source (see groups below). |
+| **Incidents** | The master table — one row per incident, columns grouped and color-coded by source (see groups below). The sheet opens with a dark title banner row and a merged group-category band row above the column headers. |
 | **Reports** | The raw source documents (articles) linked to incidents. Kept separate because many reports map to one incident; flattening them into Incidents would explode the row count. Columns: Report Number, Title, URL, Source Domain, Date Published/Downloaded, Authors, Submitters, Language, Tags, Description, Is Incident Report. |
 | **Entities** | The distinct organizations and actors tracked by the system. Columns: Entity ID, Name. |
-| **Data Dictionary** | Auto-generated reference: every column in the Incidents sheet, its group, fill rate (% non-empty), and a short description. |
-| **Coverage Map** | Summary of how incidents are classified — counts per taxonomy combination (e.g. incidents in *both* MIT and CSETv1 vs. MIT only). |
+| **Data Dictionary** | Auto-generated reference: every column in the Incidents sheet with its Column, Group, **Source**, Fill Rate (% non-empty), and a short description. |
+| **Coverage Map** | Per-taxonomy-combination counts with a "What you can analyze" column describing what analysis is possible at each level, plus a TOTAL row. |
 
 The **Incidents** sheet columns are organized into color-coded groups:
 

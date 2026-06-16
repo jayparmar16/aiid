@@ -39,6 +39,7 @@ class TaxonomyConfig:
     """Config for an individual taxonomy namespace."""
 
     color: str
+    band_label: str
     mapping: Dict[str, str]
 
 
@@ -56,6 +57,7 @@ class StyleConfig:
     """Config for an Excel column style group."""
 
     color: str
+    band_label: str
     columns: List[str]
 
 @dataclass
@@ -120,6 +122,7 @@ def load_config(path: Path) -> PipelineConfig:
     for name, tax_raw in raw.get("taxonomies", {}).items():
         taxonomies[name] = TaxonomyConfig(
             color=tax_raw["color"],
+            band_label=tax_raw.get("band_label", name),
             mapping=tax_raw["mapping"]
         )
         
@@ -127,6 +130,7 @@ def load_config(path: Path) -> PipelineConfig:
     for name, style_raw in raw.get("styles", {}).items():
         styles[name] = StyleConfig(
             color=style_raw["color"],
+            band_label=style_raw.get("band_label", name),
             columns=list(style_raw.get("columns", []))
         )
     

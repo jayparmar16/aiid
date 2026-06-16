@@ -43,7 +43,7 @@ per collection. The `config.yaml` mappings (below) map *from* the raw keys descr
 
 - **`columns`**: Maps raw BSON keys to Excel headers for core collections (Incidents, Reports, Entities).
 - **`taxonomies`**: Maps nested BSON classification attributes to flat columns based on taxonomy namespaces (e.g., MIT, GMF).
-- **`styles`**: Controls Excel formatting (hex colors, column groups) independent of Python logic.
+- **`styles`**: Controls Excel formatting (hex colors, column groups, optional `band_label`) independent of Python logic. Each group may include a `band_label` key shown in the merged group-category band row above headers; if omitted, the group name is used as the fallback label.
 - **`output`**: Enforces strict left-to-right column order in exported Excel sheets.
 
 ---
@@ -65,7 +65,7 @@ per collection. The `config.yaml` mappings (below) map *from* the raw keys descr
 1. Open `config.yaml`.
 2. Add mapping to `columns.incidents` (e.g., `new_field: New Header`).
 3. Add `New Header` to `output.column_order`.
-4. Add `New Header` to the desired block in `styles` (e.g., `styles.Identity.columns`).
+4. Add `New Header` to the desired block in `styles` (e.g., `styles.Identity.columns`). Optionally update `styles.Identity.band_label` if the group label should change.
 
 ### Add a New Taxonomy (e.g., EU AI Act)
 1. Open `config.yaml`.
@@ -73,6 +73,7 @@ per collection. The `config.yaml` mappings (below) map *from* the raw keys descr
    ```yaml
    EU_AI_ACT:
      color: "1ABC9C"
+     band_label: "REGULATORY DETAIL - EU AI Act"   # optional; defaults to "EU_AI_ACT"
      mapping:
        Incident ID: Incident ID
        Risk Category: EU Risk Category
