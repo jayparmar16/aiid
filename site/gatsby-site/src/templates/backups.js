@@ -7,7 +7,7 @@ import config from '../../config';
 import { useTranslation } from 'react-i18next';
 
 const Backups = ({ pageContext }) => {
-  const { backups, annotatedDatasets } = pageContext;
+  const { backups, excelExports } = pageContext;
 
   if (!backups) {
     return null;
@@ -38,8 +38,8 @@ const Backups = ({ pageContext }) => {
     return new Date(year, month - 1, day, hour, minute);
   };
 
-  const parseAnnotatedDatasetDate = (key) => {
-    const stringDate = key.replace('AIID_Annotated_Dataset-', '').replace('.xlsx', '');
+  const parseExcelExportDate = (key) => {
+    const stringDate = key.replace('AIID_Excel_Export-', '').replace('.xlsx', '');
 
     const year = stringDate.substring(0, 4);
 
@@ -75,44 +75,44 @@ const Backups = ({ pageContext }) => {
           through time, our suggested citation format includes the access date. You can find
           incident citations at <code>https://incidentdatabase.ai/cite/INSERT_NUMBER_HERE</code>.
         </p>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mt-6">
-          <div>
-            <h2>Snapshot Downloads</h2>
-            <p className="paragraph">
-              Weekly point-in-time dumps of the full database, available in JSON, MongoDB archive,
-              and CSV formats. Please <LocalizedLink to="/contact">contact us</LocalizedLink> to let
-              us know what you are using the database for so we can list your work and ensure your
-              use case is not dropped from support.
-            </p>
-            <ul className="pl-8 leading-6" data-cy="snapshots-list">
-              {backups
-                .map((b) => ({
-                  ...b,
-                  Url: `${config.cloudflareR2.publicBucketUrl}/${b.Key}`,
-                  CreationDate: parseCreationDate(b.Key),
-                }))
-                .map((value) => (
-                  <li key={`snapshot-${value['Key']}`}>
-                    {format(new Date(value['CreationDate']), 'yyyy-MM-dd hh:mm a')} &middot;{' '}
-                    {(value['Size'] / 1000000).toFixed(2)} MB &middot;{' '}
-                    <Link to={value['Url']}>{value['Key']}</Link>
-                  </li>
-                ))}
-            </ul>
-          </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3 mt-6">
+          <h2 className="mb-0 order-1 md:order-1">Snapshot Downloads</h2>
+          <p className="paragraph order-2 md:order-3">
+            Weekly point-in-time dumps of the full database, available in JSON, MongoDB archive, and
+            CSV formats. Please <LocalizedLink to="/contact">contact us</LocalizedLink> to let us
+            know what you are using the database for so we can list your work and ensure your use
+            case is not dropped from support. Best for developers and researchers building on the
+            raw database.
+          </p>
+          <ul className="pl-8 leading-6 order-3 md:order-5" data-cy="snapshots-list">
+            {backups
+              .map((b) => ({
+                ...b,
+                Url: `${config.cloudflareR2.publicBucketUrl}/${b.Key}`,
+                CreationDate: parseCreationDate(b.Key),
+              }))
+              .map((value) => (
+                <li key={`snapshot-${value['Key']}`}>
+                  {format(new Date(value['CreationDate']), 'yyyy-MM-dd hh:mm a')} &middot;{' '}
+                  {(value['Size'] / 1000000).toFixed(2)} MB &middot;{' '}
+                  <Link to={value['Url']}>{value['Key']}</Link>
+                </li>
+              ))}
+          </ul>
 
-          <div>
-            <h2>Annotated Dataset (Excel)</h2>
-            <p>
-              A curated, weekly-built Excel file that joins all incident records with their taxonomy
-              classifications (CSETv0, CSETv1, GMF, MIT). Suitable for tabular analysis and updated
-              every Monday.
-            </p>
-            {annotatedDatasets && annotatedDatasets.length > 0 ? (
-              <ul className="pl-8 leading-6" data-cy="master-datasets-list">
-                {annotatedDatasets.map((item) => (
-                  <li key={`master-${item.Key}`}>
-                    {format(parseAnnotatedDatasetDate(item.Key), 'yyyy-MM-dd')} &middot;{' '}
+          <h2 className="mb-0 order-4 md:order-2">Excel Export</h2>
+          <p className="order-5 md:order-4">
+            A curated Excel file, updated weekly, that combines all incident records with their
+            taxonomy classifications (CSETv0, CSETv1, GMF, MIT). Suitable for analysis and research;
+            updated every Monday. No coding required — download and open directly in Excel or Google
+            Sheets.
+          </p>
+          <div className="order-6 md:order-6">
+            {excelExports && excelExports.length > 0 ? (
+              <ul className="pl-8 leading-6" data-cy="excel-exports-list">
+                {excelExports.map((item) => (
+                  <li key={`excel-export-${item.Key}`}>
+                    {format(parseExcelExportDate(item.Key), 'yyyy-MM-dd')} &middot;{' '}
                     {(item.Size / 1000000).toFixed(2)} MB &middot;{' '}
                     <Link to={`${config.cloudflareR2.publicBucketUrl}/${item.Key}`}>
                       {item.Key}
@@ -121,7 +121,7 @@ const Backups = ({ pageContext }) => {
                 ))}
               </ul>
             ) : (
-              <p className="text-gray-500 italic">No annotated datasets available yet.</p>
+              <p className="text-gray-500 italic">No Excel exports available yet.</p>
             )}
           </div>
         </div>

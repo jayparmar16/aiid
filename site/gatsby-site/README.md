@@ -13,20 +13,6 @@
 
 ## Setting Up a Basic Development Environment
 
-### Node version note (especially on Windows)
-
-The recommended approach below uses Netlify Dev (`npm run start`). As of May 2026, Netlify CLI can crash on very new Node.js versions (for example Node 25+) with errors like `SlowBuffer.prototype.equal`.
-
-- If you hit that, switch to a Node LTS version (Node 20 or Node 22), reinstall dependencies, and try again.
-- If you only need the Gatsby frontend (no Netlify functions/API), you can run Gatsby directly:
-
-```bash
-cd site/gatsby-site
-npx gatsby develop -p 7999
-```
-
-Then open `http://localhost:7999`.
-
 Once you have cloned the repository, to set up a local development environment for the AIID project, follow these steps:
 
 1. **Navigate to the Gatsby Site Directory**
@@ -138,6 +124,8 @@ Once you have cloned the repository, to set up a local development environment f
    ```bash
    npm run start
    ```
+
+   **Note (Windows / newer Node):** If this crashes with an error like `SlowBuffer.prototype.equal`, switch to Node LTS (20 or 22) and reinstall dependencies. 
 
 The project is now running locally and can be accessed at `http://localhost:8000`, and the API is available at `http://localhost:8000/api/graphql`.
 

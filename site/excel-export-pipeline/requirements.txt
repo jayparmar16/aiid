@@ -2,6 +2,6 @@ beautifulsoup4
 lxml
 openpyxl
 pandas
-pydantic
+pymongo
 pyyaml
 requests

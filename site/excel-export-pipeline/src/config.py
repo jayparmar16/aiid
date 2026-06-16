@@ -26,38 +26,49 @@ class SnapshotConfig:
 
 @dataclass
 class ColumnsConfig:
-    """Column mapping config (raw column -> normalized output column)."""
+    """Column mapping config for core collections (raw column -> normalized output column)."""
 
     incidents: Dict[str, str]
-    mit: Dict[str, str]
-    gmf: Dict[str, str]
-    cset: Dict[str, str]
+    reports: Dict[str, str]
+    entities: Dict[str, str]
     duplicates_id_column: str
 
 
 @dataclass
-class ValidationConfig:
-    """Guardrails used to catch unexpected snapshot/schema changes."""
+class TaxonomyConfig:
+    """Config for an individual taxonomy namespace."""
 
-    expected_min_incidents: int
-    expected_mit_coverage: float
+    color: str
+    band_label: str
+    mapping: Dict[str, str]
 
 
 @dataclass
 class OutputConfig:
     """Excel output shape preferences."""
 
-    master_column_order: List[str]
+    column_order: List[str]
+    reports_column_order: List[str]
+    entities_column_order: List[str]
 
 
 @dataclass
+class StyleConfig:
+    """Config for an Excel column style group."""
+
+    color: str
+    band_label: str
+    columns: List[str]
+
+@dataclass
 class PipelineConfig:
-    """Top-level configuration for the annotated dataset build pipeline."""
+    """Top-level configuration for the Excel export build pipeline."""
 
     paths: PathsConfig
     snapshot: SnapshotConfig
     columns: ColumnsConfig
-    validation: ValidationConfig
+    taxonomies: Dict[str, TaxonomyConfig]
+    styles: Dict[str, StyleConfig]
     output: OutputConfig
 
 
@@ -65,7 +76,6 @@ def _apply_env_overrides(raw: dict) -> dict:
     """Override YAML config with environment variables"""
     paths = raw.setdefault("paths", {})
     snapshot = raw.setdefault("snapshot", {})
-    validation = raw.setdefault("validation", {})
 
     # Paths
     if os.getenv("SNAPSHOT_DIR"):
@@ -80,12 +90,6 @@ def _apply_env_overrides(raw: dict) -> dict:
         snapshot["base_url"] = os.getenv("BASE_URL")
     if os.getenv("SNAPSHOT_FILTER"):
         snapshot["snapshot_filter"] = os.getenv("SNAPSHOT_FILTER")
-
-    # Validation guardrails
-    if os.getenv("EXPECTED_MIN_INCIDENTS"):
-        validation["expected_min_incidents"] = int(os.getenv("EXPECTED_MIN_INCIDENTS"))
-    if os.getenv("EXPECTED_MIT_COVERAGE"):
-        validation["expected_mit_coverage"] = float(os.getenv("EXPECTED_MIT_COVERAGE"))
 
     return raw
 
@@ -109,23 +113,38 @@ def load_config(path: Path) -> PipelineConfig:
     )
     columns = ColumnsConfig(
         incidents=raw["columns"]["incidents"],
-        mit=raw["columns"]["mit"],
-        gmf=raw["columns"]["gmf"],
-        cset=raw["columns"]["cset"],
+        reports=raw["columns"].get("reports", {}),
+        entities=raw["columns"].get("entities", {}),
         duplicates_id_column=raw["columns"]["duplicates_id_column"],
     )
-    validation = ValidationConfig(
-        expected_min_incidents=int(raw["validation"]["expected_min_incidents"]),
-        expected_mit_coverage=float(raw["validation"]["expected_mit_coverage"]),
-    )
+    
+    taxonomies = {}
+    for name, tax_raw in raw.get("taxonomies", {}).items():
+        taxonomies[name] = TaxonomyConfig(
+            color=tax_raw["color"],
+            band_label=tax_raw.get("band_label", name),
+            mapping=tax_raw["mapping"]
+        )
+        
+    styles = {}
+    for name, style_raw in raw.get("styles", {}).items():
+        styles[name] = StyleConfig(
+            color=style_raw["color"],
+            band_label=style_raw.get("band_label", name),
+            columns=list(style_raw.get("columns", []))
+        )
+    
     output = OutputConfig(
-        master_column_order=list(raw["output"]["master_column_order"]),
+        column_order=list(raw["output"]["column_order"]),
+        reports_column_order=list(raw["output"].get("reports_column_order", [])),
+        entities_column_order=list(raw["output"].get("entities_column_order", [])),
     )
 
     return PipelineConfig(
         paths=paths,
         snapshot=snapshot,
         columns=columns,
-        validation=validation,
+        taxonomies=taxonomies,
+        styles=styles,
         output=output,
     )

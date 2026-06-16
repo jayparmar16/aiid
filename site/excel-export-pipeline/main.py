@@ -11,18 +11,17 @@ from src.load_data import load_raw_data
 from src.clean import (
     compute_duplicate_ids,
     clean_incidents,
-    clean_mit,
-    clean_gmf,
-    clean_cset,
+    clean_reports,
+    clean_entities,
+    clean_taxonomies,
 )
-from src.build_master import build_master
-from src.validate import validate_master
+from src.build_dataset import build_dataset
 from src.export_excel import export_excel
 
 
 def parse_args() -> argparse.Namespace:
     """Parse CLI args for local runs and GitHub Actions."""
-    parser = argparse.ArgumentParser(description="Build AIID annotated dataset from latest snapshot.")
+    parser = argparse.ArgumentParser(description="Build the AIID Excel export from the latest snapshot.")
     parser.add_argument(
         "--config",
         default=str(Path(__file__).with_name("config.yaml")),
@@ -37,7 +36,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
-    """Run the end-to-end annotated dataset pipeline.
+    """Run the end-to-end Excel export pipeline.
 
     Exit codes:
       0 = success
@@ -50,16 +49,19 @@ def main() -> int:
     # Load YAML config with optional env var overrides (CI-friendly).
     config = load_config(config_path)
 
-    print("Starting annotated dataset pipeline")
+    print("Starting Excel export pipeline")
     print(f"Config: {config_path}")
 
     # Download the latest public snapshot and locate required CSV inputs.
     snapshot_paths = download_and_extract(config)
     print("Snapshot download and extraction complete")
 
+    # Load raw BSONs, compute duplicate incident IDs, and clean/normalize each source.
+    raw = load_raw_data(snapshot_paths, config)
+
     if not args.skip_schema_check:
         # Fast header-only check to catch schema drift before doing heavy work.
-        schema_result = check_schema(config, snapshot_paths)
+        schema_result = check_schema(config, raw)
         if not schema_result.is_ok:
             print("Schema check failed. Missing columns:")
             for source, col, mapped in schema_result.missing:
@@ -70,54 +72,23 @@ def main() -> int:
                     print(f"  - {source}: '{col}'")
             return 2
 
-    # Load raw CSVs, compute duplicate incident IDs, and clean/normalize each source.
-    raw = load_raw_data(snapshot_paths)
     dup_ids = compute_duplicate_ids(raw.duplicates, config.columns.duplicates_id_column)
 
     inc = clean_incidents(raw.incidents, config, dup_ids)
-    mit = clean_mit(raw.mit, config, dup_ids)
-    gmf = clean_gmf(raw.gmf, config, dup_ids)
-    cset = clean_cset(raw.cset, config, dup_ids)
+    rep = clean_reports(raw.reports, config)
+    ent = clean_entities(raw.entities, config)
+    
+    cleaned_taxonomies = clean_taxonomies(raw.taxonomies, config, dup_ids)
 
     # Left-join taxonomies onto incidents (1 row per incident).
-    master = build_master(inc, mit, gmf, cset, config)
-
-    # Keep the incident spine for join/row-count guardrails.
-    inc_core = inc[
-        [
-            "Incident ID",
-            "date",
-            "year",
-            "title",
-            "description",
-            "deployer",
-            "developer",
-            "harmed",
-            "report_count",
-        ]
-    ].copy()
-
-    # Validate dataset completeness/uniqueness and basic coverage expectations.
-    validation = validate_master(master, inc_core, config)
-    if not validation.ok:
-        print("Validation failed:")
-        for error in validation.errors:
-            print(f"  - {error}")
-        if validation.warnings:
-            print("Warnings:")
-            for warning in validation.warnings:
-                print(f"  - {warning}")
-        return 3
-
-    if validation.warnings:
-        print("Validation warnings:")
-        for warning in validation.warnings:
-            print(f"  - {warning}")
+    dataset = build_dataset(inc, cleaned_taxonomies, config)
 
     # Export to Excel (artifact path is typically set via OUTPUT_PATH in CI).
-    export_excel(master, config.paths.output_path)
+    export_excel(dataset, rep, ent, config)
     print(f"Excel written to {config.paths.output_path}")
-    print(f"Rows: {len(master)} Columns: {len(master.columns)}")
+    print(f"Incidents Rows: {len(dataset)} Columns: {len(dataset.columns)}")
+    print(f"Reports Rows: {len(rep)}")
+    print(f"Entities Rows: {len(ent)}")
 
     return 0
 

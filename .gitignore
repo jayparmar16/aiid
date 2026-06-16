@@ -81,7 +81,13 @@ package-lock.json
 
 site/gatsby-site/src/api/lookupIndex.json
 
-# Master DB pipeline (generated/downloaded artifacts)
+# Excel export pipeline (generated/downloaded artifacts)
 data/snapshots/
 output/
 .artifacts/
+
+# Local-only secrets (Cloudflare R2)
+scripts/set-r2-env.ps1
+
+
+data/db_dump/

@@ -12,13 +12,13 @@ from .config import PipelineConfig
 
 @dataclass
 class SnapshotPaths:
-    """Resolved paths to the snapshot CSV inputs used by the pipeline."""
+    """Resolved paths to the snapshot BSON inputs used by the pipeline."""
 
     incidents: Path
-    mit: Path
-    gmf: Path
-    cset: Path
+    classifications: Path
     duplicates: Path
+    reports: Path
+    entities: Path
 
 
 def _latest_snapshot_url(links: list[str]) -> str:
@@ -37,13 +37,20 @@ def _find_file(root: Path, pattern: str) -> Path:
     matches = list(root.rglob(pattern))
     if not matches:
         raise FileNotFoundError(
-            f"Could not find '{pattern}' under {root}. The snapshot structure may have changed."
+            f"Validation Error: Could not find required backup file '{pattern}' under {root}. "
+            "The MongoDB snapshot structure may have changed or the download failed."
         )
-    return matches[0]
+    file_path = matches[0]
+    if file_path.stat().st_size == 0:
+        raise ValueError(
+            f"Validation Error: The file '{file_path.name}' was found but is 0 bytes. "
+            "The backup archive may be corrupted."
+        )
+    return file_path
 
 
 def download_and_extract(config: PipelineConfig) -> SnapshotPaths:
-    """Download the latest public snapshot tarball and locate required CSVs."""
+    """Download the latest public snapshot tarball and locate required BSONs."""
     snapshot_dir = config.paths.snapshot_dir
     snapshot_dir.mkdir(parents=True, exist_ok=True)
 
@@ -81,16 +88,10 @@ def download_and_extract(config: PipelineConfig) -> SnapshotPaths:
         # Use the safer extraction filter (Python 3.11+).
         tar.extractall(snapshot_dir, filter="data")
 
-    incidents_path = _find_file(snapshot_dir, "incidents.csv")
-    mit_path = _find_file(snapshot_dir, "classifications_MIT.csv")
-    gmf_path = _find_file(snapshot_dir, "classifications_GMF.csv")
-    cset_path = _find_file(snapshot_dir, "classifications_CSETv1.csv")
-    duplicates_path = _find_file(snapshot_dir, "duplicates.csv")
-
     return SnapshotPaths(
-        incidents=incidents_path,
-        mit=mit_path,
-        gmf=gmf_path,
-        cset=cset_path,
-        duplicates=duplicates_path,
+        incidents=_find_file(snapshot_dir, "incidents.bson"),
+        classifications=_find_file(snapshot_dir, "classifications.bson"),
+        duplicates=_find_file(snapshot_dir, "duplicates.bson"),
+        reports=_find_file(snapshot_dir, "reports.bson"),
+        entities=_find_file(snapshot_dir, "entities.bson"),
     )
