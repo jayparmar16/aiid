@@ -1,66 +1,88 @@
-## Summary
+# Excel Export Pipeline + Snapshot Page Redesign
 
-Adds an automated pipeline that produces a downloadable Excel export of the full AIID dataset and updates the `/research/snapshots` page to surface it.
+## What this PR does
 
-## Why
+Replaces the old `master-db-pipeline` with a new config-driven ETL pipeline (`site/excel-export-pipeline/`) that produces a styled multi-sheet Excel workbook from the latest AIID snapshot. Also redesigns the `/research/snapshots` page to surface the workbook alongside snapshot downloads.
 
-Researchers, journalists, and analysts who want to explore the database often do not want to write GraphQL queries or work with raw MongoDB dumps. A single Excel file with incidents, reports, entities, and taxonomy classifications joined together covers that use case without any API or database knowledge required.
+---
 
-## What changed
+## Key changes
 
-### New: `site/excel-export-pipeline/`
+### New pipeline — `site/excel-export-pipeline/`
 
-A Python pipeline with 6 modules, each mapping to a documented maintenance step:
+A weekly GitHub Actions workflow downloads the latest AIID snapshot, processes it through a staged Python pipeline, and uploads the resulting workbook to Cloudflare R2.
 
-| Module | What it does |
+All column mappings, taxonomy namespaces, colours, and output paths live in `config.yaml` — no Python changes needed to add a column or taxonomy.
+
+Pipeline stages:
+
+1. **Download** — fetches and extracts the latest `.tar.bz2` snapshot
+2. **Schema check** — validates YAML-mapped columns still exist upstream; exits `2` on drift
+3. **Load** — reads BSON into DataFrames, flattens taxonomy `attributes` arrays
+4. **Clean** — standardises dates, deduplicates, parses JSON-array strings
+5. **Join** — left-joins MIT / GMF / CSETv1 onto the incident spine; populates `Data Sources`
+6. **Export** — writes the styled multi-sheet workbook
+
+### Excel workbook — 5 sheets
+
+| Sheet | Description |
 |---|---|
-| `download.py` | Scrapes the snapshots page, downloads the latest `.tar.bz2`, extracts BSONs |
-| `schema_check.py` | Validates expected columns are present before processing starts |
-| `load_data.py` | Loads 5 BSON collections into DataFrames, flattens taxonomy attributes |
-| `clean.py` | Normalises each source; taxonomy-specific hooks registered in `CLEANING_HOOKS` |
-| `build_dataset.py` | Left-joins all taxonomies onto the incident spine (one row per incident) |
-| `export_excel.py` | Writes a styled 5-sheet workbook |
+| **Incidents** | One row per incident. Dark title banner + merged group-category band row + group-coloured headers. Freeze at C4. |
+| **Reports** | Source articles linked to incidents. Banner + navy header + zebra rows. |
+| **Entities** | Organisations and actors. Same styling as Reports. |
+| **Data Dictionary** | Every Incidents column with Group, Source, Fill Rate, and Description. |
+| **Coverage Map** | Per-taxonomy-combination counts with a "What you can analyze" column and a TOTAL row. |
 
-Output: **5 sheets** -- Incidents, Reports, Entities, Data Dictionary, Coverage Map.
+Colour palette matches `AIID_Master_Dataset-20260513.xlsx`: Identity `#1F3864`, Coverage `#2E4057`, MIT `#1A6B3C`, GMF `#7B3F00`, CSETv1 `#4A235A`.
 
-Config is YAML-driven (`config.yaml`). Column mappings, taxonomy namespaces, style groups, and output paths are all configurable without touching code. See [`MAINTENANCE_GUIDE.md`](site/excel-export-pipeline/MAINTENANCE_GUIDE.md) for how to add columns, taxonomies, or cleaning hooks.
+Group band labels are driven by an optional `band_label` key in `config.yaml` — defaults to the group name if absent.
 
-### New: GitHub Actions workflow
+### Annotated-db-pipeline cleanup
 
-`.github/workflows/excel-export-pipeline.yml` runs every Monday at 10:00 UTC and on manual dispatch. It builds the workbook and uploads it to Cloudflare R2 as `AIID_Excel_Export-YYYYMMDD.xlsx`.
+- Renamed `master-db-pipeline` → `annotated-db-pipeline` throughout (workflow, modules, config keys)
+- Removed stale `build_master.py` and the old GitHub Actions workflow
+- `.gitignore` updated to exclude local `data/` and `output/`
 
-Required repository secrets:
-- `CLOUDFLARE_R2_ACCOUNT_ID`
-- `CLOUDFLARE_R2_WRITE_ACCESS_KEY_ID`
-- `CLOUDFLARE_R2_WRITE_SECRET_ACCESS_KEY`
-- `CLOUDFLARE_R2_BUCKET_NAME`
+### Snapshot page
 
-### Updated: `/research/snapshots` page
+- Two-column layout: snapshot downloads (left), Excel export (right)
+- `createBackupsPage.js` separates Excel exports from database backups
+- `backups.js` shows build date, file size, and download link
 
-- Two-column layout: snapshot downloads on the left, Excel export on the right. Stacks vertically on mobile.
-- `createBackupsPage.js` now always renders (with an empty state) even when R2 is unreachable, and separates Excel exports (`AIID_Excel_Export-*.xlsx`) from database backups (`backup-*`).
-- `backups.js` shows build date, file size, and download link for each export.
+---
 
-### Updated: `site/db-backup/bin/cloudflare_operations.py`
-
-Added an optional `--content_type` CLI argument (default: `application/x-bzip2`). Excel uploads require `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`.
-
-### Removed: `site/annotated-db-pipeline/`
-
-Superseded by `excel-export-pipeline`. All content has been moved or rewritten.
-
-## How to test locally
+## How to verify
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\Activate.ps1
-pip install -r site/excel-export-pipeline/requirements.txt
-python site/excel-export-pipeline/main.py
-# Output written to: output/AIID_Excel_Export.xlsx
+cd site/excel-export-pipeline
+
+# 1. Compile check
+python -m py_compile main.py src/*.py
+
+# 2. End-to-end run (uses cached snapshot — no network needed after first run)
+python main.py
+# Expected: exit 0, "Excel written to …/output/AIID_Excel_Export.xlsx"
+
+# 3. Assert structure and styling
+python - <<'PY'
+import openpyxl
+from openpyxl.utils import get_column_letter
+wb = openpyxl.load_workbook("../../output/AIID_Excel_Export.xlsx")
+assert wb.sheetnames == ["Incidents","Reports","Entities","Data Dictionary","Coverage Map"]
+ws = wb["Incidents"]
+n = ws.max_column
+assert ws["A1"].fill.fgColor.rgb.endswith("0D1B2A")          # banner colour
+assert ws["A3"].fill.fgColor.rgb.endswith("1F3864")           # Identity header
+assert ws.cell(3, next(c for c in range(1,n+1) if ws.cell(3,c).value == "Risk Domain")).fill.fgColor.rgb.endswith("1A6B3C")  # MIT header
+assert ws.freeze_panes == "C4"
+assert ws.cell(4,1).fill.fgColor.rgb.endswith("FFFFFF")       # row 1 white
+assert ws.cell(5,1).fill.fgColor.rgb.endswith("F5F5F5")       # row 2 stripe
+dd = wb["Data Dictionary"]
+assert [dd.cell(2,i).value for i in range(1,6)] == ["Column","Group","Source","Fill Rate","Description"]
+cm = wb["Coverage Map"]
+assert cm.cell(cm.max_row,1).value == "TOTAL"
+print("OK")
+PY
 ```
 
-The pipeline downloads the latest public snapshot on first run and caches it locally under `snapshot_dir` (set in `config.yaml`). Subsequent runs reuse the cached archive.
-
-## Example output
-
-An example workbook from a recent CI run is available [here](https://github.com/jayparmar16/aiid/actions/runs/24663527799/artifacts/6530236159).
+Pass = prints `OK`.
