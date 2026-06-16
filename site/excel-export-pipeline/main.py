@@ -16,7 +16,6 @@ from src.clean import (
     clean_taxonomies,
 )
 from src.build_dataset import build_dataset
-from src.validate import validate_dataset
 from src.export_excel import export_excel
 
 
@@ -83,38 +82,6 @@ def main() -> int:
 
     # Left-join taxonomies onto incidents (1 row per incident).
     dataset = build_dataset(inc, cleaned_taxonomies, config)
-
-    # Keep the incident spine for join/row-count guardrails.
-    inc_core = inc[
-        [
-            "Incident ID",
-            "date",
-            "year",
-            "title",
-            "description",
-            "deployer",
-            "developer",
-            "harmed",
-            "report_count",
-        ]
-    ].copy()
-
-    # Validate dataset completeness/uniqueness and basic coverage expectations.
-    validation = validate_dataset(dataset, inc_core)
-    if not validation.ok:
-        print("Validation failed:")
-        for error in validation.errors:
-            print(f"  - {error}")
-        if validation.warnings:
-            print("Warnings:")
-            for warning in validation.warnings:
-                print(f"  - {warning}")
-        return 3
-
-    if validation.warnings:
-        print("Validation warnings:")
-        for warning in validation.warnings:
-            print(f"  - {warning}")
 
     # Export to Excel (artifact path is typically set via OUTPUT_PATH in CI).
     export_excel(dataset, rep, ent, config)

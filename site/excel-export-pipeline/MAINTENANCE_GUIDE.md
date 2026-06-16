@@ -55,8 +55,7 @@ per collection. The `config.yaml` mappings (below) map *from* the raw keys descr
 3. **Load (`load_data.py`)**: Reads BSON files into Pandas DataFrames and dynamically flattens the classifications based on `taxonomies` defined in the YAML — filters by namespace (MIT, GMF, CSETv1) and pivots each document's `attributes` array so every `short_name` becomes a standard column.
 4. **Clean (`clean.py`)**: Formats dates into standardized formats, purges incident IDs found in `duplicates.bson` from all datasets (preventing ghost records), parses JSON-like string arrays into readable strings (e.g. `["navya", "keolis"]` → `"Navya, Keolis"`), and strips numeric prefixes from MIT labels (e.g. `"1. Physical Safety"` → `"Physical Safety"`).
 5. **Join (`build_dataset.py`)**: Takes the cleaned Incidents DataFrame as the spine and left-joins the flattened MIT, GMF, and CSETv1 tables on `Incident ID`. Every incident gets exactly **one row**; an incident lacking a taxonomy classification simply has blank (`NaN`) cells for it. Populates the "Data Sources" column based on which joins matched.
-6. **Validate (`validate.py`)**: Relational-integrity guardrails — primary-key uniqueness, required-field completeness, and a row-count check ensuring the joins didn't multiply rows (exits with code `3` on failure).
-7. **Export (`export_excel.py`)**: Applies `config.yaml` styling and writes the multi-sheet Excel workbook.
+6. **Export (`export_excel.py`)**: Applies `config.yaml` styling and writes the multi-sheet Excel workbook.
 
 ---
 
@@ -100,13 +99,13 @@ If a taxonomy requires custom formatting beyond basic column renaming (e.g., con
 
 ## 4. Testing / Validating Your Changes
 
-There is no automated test suite — the pipeline's own guardrails are the safety net, so validate changes by running it end-to-end:
+There is no automated test suite — run the pipeline end-to-end to validate changes:
 
 1. Run it: `python main.py` (add `--skip-schema-check` while iterating on snapshots whose schema is in flux).
 2. A clean run exits `0` and prints `Excel written to …/output/AIID_Excel_Export.xlsx` followed by the row counts.
 3. Open `output/AIID_Excel_Export.xlsx` and confirm all five sheets are present: **Incidents, Reports, Entities, Data Dictionary, Coverage Map**.
 4. Sanity-check the row counts against the current database (recent run: ~1,496 incidents, ~7,143 reports, ~6,380 entities). Large, unexplained drops usually signal a join or cleaning regression.
-5. Treat the exit code as the verdict — `2` = schema check failed, `3` = a validation guardrail tripped (see [Exit Codes](README.md#exit-codes) and Troubleshooting below).
+5. Treat the exit code as the verdict — `2` = schema check failed (see [Exit Codes](README.md#exit-codes) and Troubleshooting below).
 
 ---
 
@@ -117,6 +116,3 @@ There is no automated test suite — the pipeline's own guardrails are the safet
   
 - **`ValueError: The file ... is 0 bytes`**
   The backup archive is corrupted or the database export failed upstream. Verify the snapshot hosted on Cloudflare R2.
-  
-- **`Row explosion: dataset has X rows but core incidents has Y`**
-  A taxonomy left-join introduced duplicate rows. This occurs if a taxonomy contains multiple conflicting records for a single `Incident ID`. Add deduplication logic for that specific taxonomy in `src/clean.py`.

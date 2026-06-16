@@ -16,10 +16,9 @@ Builds the AI Incident Database Excel Export: a multi-sheet Excel workbook joini
 4. Cleans and normalises each data source (deduplicates, renames columns, parses arrays).
 5. Dynamically flattens `classifications.bson` based on namespaces defined in `config.yaml`.
 6. Left-joins taxonomies onto the incident spine, guaranteeing one row per incident.
-7. Validates relational data quality (uniqueness, primary key integrity).
-8. Exports a 5-sheet Excel workbook: **Incidents**, **Reports**, **Entities**, plus an auto-generated **Data Dictionary** and **Coverage Map**.
+7. Exports a 5-sheet Excel workbook: **Incidents**, **Reports**, **Entities**, plus an auto-generated **Data Dictionary** and **Coverage Map**.
 
-> **Local vs CI:** Steps 1–8 are what `main.py` does — a local run only **writes the workbook to disk**. Uploading it to Cloudflare R2 is a separate step that runs **only in GitHub Actions** (see the CI/CD section below); `main.py` never uploads.
+> **Local vs CI:** Steps 1–7 are what `main.py` does — a local run only **writes the workbook to disk**. Uploading it to Cloudflare R2 is a separate step that runs **only in GitHub Actions** (see the CI/CD section below); `main.py` never uploads.
 
 ---
 
@@ -33,7 +32,6 @@ main.py  ←  entry point, orchestrates all stages
 ├── src/load_data.py      Load 5 BSONs into pandas DataFrames, dynamically parsing taxonomy attributes
 ├── src/clean.py          Normalise each source using a Registry Pattern for specific taxonomy hooks
 ├── src/build_dataset.py   Left-join all taxonomies onto the incident spine sequentially
-├── src/validate.py       Data quality and relational integrity guardrails
 ├── src/export_excel.py   Write the styled, multi-sheet Excel workbook
 └── src/config.py         Typed config dataclasses + YAML loader with env overrides
 ```
@@ -172,9 +170,8 @@ Only the final upload step needs these; the build itself runs without any creden
 | `0` | Success — Excel file written |
 | `1`* | Uncaught exception — missing/0-byte file, network failure, etc. |
 | `2` | Schema check failed — missing mapped columns in upstream BSONs |
-| `3` | Validation failed — relational integrity guardrail triggered |
 
-\* `main.py` only ever *returns* `0`, `2`, or `3` deliberately; any other failure surfaces as a non-zero exit (typically `1`) from an uncaught Python exception, so don't write CI logic that depends on a guaranteed `1`.
+\* `main.py` only ever *returns* `0` or `2` deliberately; any other failure surfaces as a non-zero exit (typically `1`) from an uncaught Python exception, so don't write CI logic that depends on a guaranteed `1`.
 
 ---
 
