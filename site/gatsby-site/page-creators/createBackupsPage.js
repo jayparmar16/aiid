@@ -4,11 +4,11 @@ const { S3Client, ListObjectsV2Command } = require('@aws-sdk/client-s3');
 
 const config = require('../config');
 
-const createSnapshotsPage = (createPage, backups = [], annotatedDatasets = []) => {
+const createSnapshotsPage = (createPage, backups = [], excelExports = []) => {
   createPage({
     path: '/research/snapshots',
     component: path.resolve('./src/templates/backups.js'),
-    context: { backups, annotatedDatasets },
+    context: { backups, excelExports },
   });
 };
 
@@ -30,15 +30,15 @@ const createBackupsPage = async (_, createPage) => {
 
     const allObjects = result.Contents ?? [];
 
-    const annotatedDatasets = allObjects
-      .filter((obj) => obj.Key.startsWith('AIID_Annotated_Dataset-') && obj.Key.endsWith('.xlsx'))
+    const excelExports = allObjects
+      .filter((obj) => obj.Key.startsWith('AIID_Excel_Export-') && obj.Key.endsWith('.xlsx'))
       .sort((a, b) => (a.Key < b.Key ? 1 : a.Key > b.Key ? -1 : 0));
 
     const backups = allObjects
       .filter((obj) => obj.Key.startsWith('backup-'))
       .sort((a, b) => (a.Key < b.Key ? 1 : a.Key > b.Key ? -1 : 0));
 
-    createSnapshotsPage(createPage, backups, annotatedDatasets);
+    createSnapshotsPage(createPage, backups, excelExports);
   } catch (error) {
     console.warn(
       `[createBackupsPage] R2 listing failed: ${error.message}. Creating page with empty data.`

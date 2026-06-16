@@ -15,7 +15,7 @@ The GitHub Action "Public backup to the cloud" [/.github/workflows/db-backup.yml
 
 After running this, `backup-YYYYMMdd.tar.bz2` will be placed on the Cloudflare R2 Bucket.
 
-A separate pipeline ([site/annotated-db-pipeline](../annotated-db-pipeline/README.md)) runs on the same schedule and produces `AIID_Annotated_Dataset-YYYYMMDD.xlsx` — a curated Excel workbook that joins incident records with their taxonomy classifications (MIT, GMF, CSETv1). Both outputs are surfaced on the [snapshots page](https://incidentdatabase.ai/research/snapshots/).
+A separate pipeline ([site/excel-export-pipeline](../excel-export-pipeline/README.md)) runs on the same schedule and produces `AIID_Excel_Export-YYYYMMDD.xlsx` — a curated Excel workbook that joins incident records with their taxonomy classifications (MIT, GMF, CSETv1). Both outputs are surfaced on the [snapshots page](https://incidentdatabase.ai/research/snapshots/).
 
 
 Required environment variables

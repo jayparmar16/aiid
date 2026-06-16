@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
-import pandas as pd
 
 from .config import PipelineConfig
-from .download import SnapshotPaths
+from .load_data import RawData
 
 
 @dataclass
@@ -21,30 +20,25 @@ class SchemaCheckResult:
         return len(self.missing) == 0
 
 
-def check_schema(config: PipelineConfig, paths: SnapshotPaths) -> SchemaCheckResult:
+def check_schema(config: PipelineConfig, raw: RawData) -> SchemaCheckResult:
     """Compare snapshot headers against configured column mappings"""
-    # Read only headers to keep this check fast and CI-friendly.
-    raw_incidents = pd.read_csv(paths.incidents, nrows=0)
-    raw_mit = pd.read_csv(paths.mit, nrows=0)
-    raw_gmf = pd.read_csv(paths.gmf, nrows=0)
-    raw_cset = pd.read_csv(paths.cset, nrows=0)
-    raw_duplicates = pd.read_csv(paths.duplicates, nrows=0)
-
     file_cols: Dict[str, set[str]] = {
-        "incidents": set(raw_incidents.columns),
-        "MIT": set(raw_mit.columns),
-        "GMF": set(raw_gmf.columns),
-        "CSETv1": set(raw_cset.columns),
-        "duplicates": set(raw_duplicates.columns),
+        "incidents": set(raw.incidents.columns),
+        "reports": set(raw.reports.columns),
+        "entities": set(raw.entities.columns),
+        "duplicates": set(raw.duplicates.columns),
     }
 
     check_maps: Dict[str, Dict[str, str]] = {
         "incidents": config.columns.incidents,
-        "MIT": config.columns.mit,
-        "GMF": config.columns.gmf,
-        "CSETv1": config.columns.cset,
+        "reports": config.columns.reports,
+        "entities": config.columns.entities,
         "duplicates": {config.columns.duplicates_id_column: config.columns.duplicates_id_column},
     }
+
+    for tax_name, tax_df in raw.taxonomies.items():
+        file_cols[tax_name] = set(tax_df.columns)
+        check_maps[tax_name] = config.taxonomies[tax_name].mapping
 
     missing: List[Tuple[str, str, str]] = []
     new_cols: List[Tuple[str, str]] = []
