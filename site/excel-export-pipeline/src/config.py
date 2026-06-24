@@ -9,19 +9,18 @@ import yaml
 
 @dataclass
 class PathsConfig:
-    """Filesystem locations for inputs/outputs."""
+    """Filesystem locations for outputs."""
 
-    snapshot_dir: Path
     output_path: Path
 
 
 @dataclass
-class SnapshotConfig:
-    """Settings for discovering and downloading public snapshot archives."""
+class MongoConfig:
+    """Settings for connecting to the live MongoDB database."""
 
-    base_url: str
-    snapshot_page_url: str
-    snapshot_filter: str
+    uri: str
+    database: str
+    collections: Dict[str, str]
 
 
 @dataclass
@@ -65,7 +64,7 @@ class PipelineConfig:
     """Top-level configuration for the Excel export build pipeline."""
 
     paths: PathsConfig
-    snapshot: SnapshotConfig
+    mongo: MongoConfig
     columns: ColumnsConfig
     taxonomies: Dict[str, TaxonomyConfig]
     styles: Dict[str, StyleConfig]
@@ -75,21 +74,10 @@ class PipelineConfig:
 def _apply_env_overrides(raw: dict) -> dict:
     """Override YAML config with environment variables"""
     paths = raw.setdefault("paths", {})
-    snapshot = raw.setdefault("snapshot", {})
 
     # Paths
-    if os.getenv("SNAPSHOT_DIR"):
-        paths["snapshot_dir"] = os.getenv("SNAPSHOT_DIR")
     if os.getenv("OUTPUT_PATH"):
         paths["output_path"] = os.getenv("OUTPUT_PATH")
-
-    # Snapshot discovery
-    if os.getenv("SNAPSHOT_PAGE_URL"):
-        snapshot["snapshot_page_url"] = os.getenv("SNAPSHOT_PAGE_URL")
-    if os.getenv("BASE_URL"):
-        snapshot["base_url"] = os.getenv("BASE_URL")
-    if os.getenv("SNAPSHOT_FILTER"):
-        snapshot["snapshot_filter"] = os.getenv("SNAPSHOT_FILTER")
 
     return raw
 
@@ -103,13 +91,14 @@ def load_config(path: Path) -> PipelineConfig:
     raw = _apply_env_overrides(raw)
 
     paths = PathsConfig(
-        snapshot_dir=Path(raw["paths"]["snapshot_dir"]).resolve(),
         output_path=Path(raw["paths"]["output_path"]).resolve(),
     )
-    snapshot = SnapshotConfig(
-        base_url=raw["snapshot"]["base_url"],
-        snapshot_page_url=raw["snapshot"]["snapshot_page_url"],
-        snapshot_filter=raw["snapshot"]["snapshot_filter"],
+    # The connection string is a secret, supplied via env (never stored in YAML).
+    # MONGODB_URI is also accepted for parity with the DB-backup script.
+    mongo = MongoConfig(
+        uri=os.getenv("MONGODB_CONNECTION_STRING") or os.getenv("MONGODB_URI") or "",
+        database=raw["mongo"]["database"],
+        collections=dict(raw["mongo"]["collections"]),
     )
     columns = ColumnsConfig(
         incidents=raw["columns"]["incidents"],
@@ -142,7 +131,7 @@ def load_config(path: Path) -> PipelineConfig:
 
     return PipelineConfig(
         paths=paths,
-        snapshot=snapshot,
+        mongo=mongo,
         columns=columns,
         taxonomies=taxonomies,
         styles=styles,

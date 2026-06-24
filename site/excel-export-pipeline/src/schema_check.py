@@ -21,7 +21,7 @@ class SchemaCheckResult:
 
 
 def check_schema(config: PipelineConfig, raw: RawData) -> SchemaCheckResult:
-    """Compare snapshot headers against configured column mappings"""
+    """Compare loaded collection headers against configured column mappings"""
     file_cols: Dict[str, set[str]] = {
         "incidents": set(raw.incidents.columns),
         "reports": set(raw.reports.columns),

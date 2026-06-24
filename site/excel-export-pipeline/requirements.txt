@@ -1,7 +1,5 @@
-beautifulsoup4
-lxml
+dnspython
 openpyxl
 pandas
 pymongo
 pyyaml
-requests

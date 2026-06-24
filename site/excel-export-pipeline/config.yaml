@@ -1,11 +1,16 @@
 paths:
-  snapshot_dir: ./data/snapshots
   output_path: ../../output/AIID_Excel_Export.xlsx
 
-snapshot:
-  base_url: https://incidentdatabase.ai
-  snapshot_page_url: https://incidentdatabase.ai/research/snapshots/
-  snapshot_filter: .tar.bz2
+mongo:
+  # Connection string is supplied via the MONGODB_CONNECTION_STRING env var
+  # (an Atlas mongodb+srv:// URI) and is never stored here.
+  database: aiidprod
+  collections:
+    incidents: incidents
+    reports: reports
+    entities: entities
+    duplicates: duplicates
+    classifications: classifications
 
 columns:
   incidents:

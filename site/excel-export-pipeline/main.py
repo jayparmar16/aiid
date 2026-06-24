@@ -5,7 +5,6 @@ from pathlib import Path
 import sys
 
 from src.config import load_config
-from src.download import download_and_extract
 from src.schema_check import check_schema
 from src.load_data import load_raw_data
 from src.clean import (
@@ -21,7 +20,7 @@ from src.export_excel import export_excel
 
 def parse_args() -> argparse.Namespace:
     """Parse CLI args for local runs and GitHub Actions."""
-    parser = argparse.ArgumentParser(description="Build the AIID Excel export from the latest snapshot.")
+    parser = argparse.ArgumentParser(description="Build the AIID Excel export directly from the live MongoDB database.")
     parser.add_argument(
         "--config",
         default=str(Path(__file__).with_name("config.yaml")),
@@ -52,12 +51,9 @@ def main() -> int:
     print("Starting Excel export pipeline")
     print(f"Config: {config_path}")
 
-    # Download the latest public snapshot and locate required CSV inputs.
-    snapshot_paths = download_and_extract(config)
-    print("Snapshot download and extraction complete")
-
-    # Load raw BSONs, compute duplicate incident IDs, and clean/normalize each source.
-    raw = load_raw_data(snapshot_paths, config)
+    # Read the required collections directly from the live MongoDB database.
+    raw = load_raw_data(config)
+    print(f"Loaded live data from MongoDB ({config.mongo.database})")
 
     if not args.skip_schema_check:
         # Fast header-only check to catch schema drift before doing heavy work.
