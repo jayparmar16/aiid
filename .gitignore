@@ -86,8 +86,5 @@ data/snapshots/
 output/
 .artifacts/
 
-# Local-only secrets (Cloudflare R2)
-scripts/set-r2-env.ps1
-
 
 data/db_dump/

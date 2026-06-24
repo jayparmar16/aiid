@@ -1,34 +1,35 @@
 # Pipeline Maintenance Guide
 
-This pipeline utilizes a **Metadata-Driven Architecture**. Configuration rules for data extraction, flattening, and Excel formatting are defined entirely in `config.yaml`. Avoid modifying Python code for routine schema updates or aesthetic changes.
+Configuration rules for data extraction, flattening, and Excel formatting are defined entirely in `config.yaml`.
 
 > **Related docs:** [README](README.md) — overview, how to run, CI/CD, and the output workbook's sheets/columns.
 
 ---
 
-## Data Model (raw MongoDB dump)
+## Data Model
 
-The pipeline starts from a `.tar.bz2` snapshot of the production database — a set of BSON files, one
-per collection. The `config.yaml` mappings (below) map *from* the raw keys described here.
+The pipeline reads live from the production MongoDB database (`aiidprod`) — the same database the
+weekly DB backup dumps. The `config.yaml` mappings (below) map *from* the raw document keys described
+here.
 
 ### Core collections
 
-- **`incidents.bson` (the spine)** — one document per unique AI incident (~1,500 records). Core
+- **`incidents`** — one document per unique AI incident (~1,500 records). Core
   identity fields (`incident_id`, `title`, `description`, `date`), lists of involved parties
   (`Alleged deployer of AI system`, `Alleged developer of AI system`,
   `Alleged harmed or nearly harmed parties`), plus metadata: NLP similarity scores, TSNE coordinates,
   embeddings, editors, and arrays mapping the incident to its reports.
-- **`reports.bson` (the sources)** — one document per source article (~7,100 records):
+- **`reports`** — one document per source article (~7,100 records):
   `report_number`, `title`, `url`, `source_domain`, publication dates, authors, submitters, the full
   scraped `text`, and `tags`. Many-to-one with incidents.
-- **`entities.bson` (the actors)** — one document per recognized entity — companies, organizations,
+- **`entities`** — one document per recognized entity — companies, organizations,
   individuals (~6,300 records): `entity_id`, `name`, modification timestamps.
-- **`duplicates.bson` (dedup mapping)** — key-value pairs mapping a `duplicate_incident_number` to its
+- **`duplicates`** — key-value pairs mapping a `duplicate_incident_number` to its
   `true_incident_number`, used to filter deprecated incident IDs out of the final dataset.
 
 ### The taxonomies collection
 
-- **`classifications.bson` (the annotations)** — each document is a set of classifications applied to
+- **`classifications`** — each document is a set of classifications applied to
   an incident (or report) under a specific **namespace** (taxonomy). Values are not flat columns:
   they are stored as an array of `attributes`, each with a `short_name` (field name) and `value_json`
   (the value). Namespaces:
@@ -41,8 +42,8 @@ per collection. The `config.yaml` mappings (below) map *from* the raw keys descr
 
 ## 1. Configuration (`config.yaml`)
 
-- **`columns`**: Maps raw BSON keys to Excel headers for core collections (Incidents, Reports, Entities).
-- **`taxonomies`**: Maps nested BSON classification attributes to flat columns based on taxonomy namespaces (e.g., MIT, GMF).
+- **`columns`**: Maps raw MongoDB document keys to Excel headers for core collections (Incidents, Reports, Entities).
+- **`taxonomies`**: Maps nested classification attributes to flat columns based on taxonomy namespaces (e.g., MIT, GMF).
 - **`styles`**: Controls Excel formatting (hex colors, column groups, optional `band_label`) independent of Python logic. Each group may include a `band_label` key shown in the merged group-category band row above headers; if omitted, the group name is used as the fallback label.
 - **`output`**: Enforces strict left-to-right column order in exported Excel sheets.
 
@@ -50,12 +51,11 @@ per collection. The `config.yaml` mappings (below) map *from* the raw keys descr
 
 ## 2. Pipeline Execution Steps
 
-1. **Download (`download.py`)**: Fetches the latest MongoDB `.tar.bz2` dump, extracts files, and validates structural integrity (0-byte checks).
-2. **Schema Check (`schema_check.py`)**: Header-level check that the columns mapped in `config.yaml` still exist in the upstream BSONs, catching schema drift before any heavy processing (exits with code `2` on a mismatch; bypass with `--skip-schema-check`).
-3. **Load (`load_data.py`)**: Reads BSON files into Pandas DataFrames and dynamically flattens the classifications based on `taxonomies` defined in the YAML — filters by namespace (MIT, GMF, CSETv1) and pivots each document's `attributes` array so every `short_name` becomes a standard column.
-4. **Clean (`clean.py`)**: Formats dates into standardized formats, purges incident IDs found in `duplicates.bson` from all datasets (preventing ghost records), parses JSON-like string arrays into readable strings (e.g. `["navya", "keolis"]` → `"Navya, Keolis"`), and strips numeric prefixes from MIT labels (e.g. `"1. Physical Safety"` → `"Physical Safety"`).
-5. **Join (`build_dataset.py`)**: Takes the cleaned Incidents DataFrame as the spine and left-joins the flattened MIT, GMF, and CSETv1 tables on `Incident ID`. Every incident gets exactly **one row**; an incident lacking a taxonomy classification simply has blank (`NaN`) cells for it. Populates the "Data Sources" column based on which joins matched.
-6. **Export (`export_excel.py`)**: Applies `config.yaml` styling and writes the multi-sheet Excel workbook.
+1. **Connect & Load (`load_data.py`)**: Connects to the `aiidprod` MongoDB database (via `MONGODB_CONNECTION_STRING`) and reads the `incidents`, `reports`, `entities`, `duplicates`, and `classifications` collections into Pandas DataFrames. Flattens the classifications based on `taxonomies` defined in the YAML — filters by namespace (MIT, GMF, CSETv1) and pivots each document's `attributes` array so every `short_name` becomes a standard column.
+2. **Schema Check (`schema_check.py`)**: Header-level check that the columns mapped in `config.yaml` still exist in the upstream collections, catching schema drift before any heavy processing (exits with code `2` on a mismatch; bypass with `--skip-schema-check`).
+3. **Clean (`clean.py`)**: Formats dates into standardized formats, purges incident IDs found in the `duplicates` collection from all datasets (preventing ghost records), parses JSON-like string arrays into readable strings (e.g. `["navya", "keolis"]` → `"Navya, Keolis"`), and strips numeric prefixes from MIT labels (e.g. `"1. Physical Safety"` → `"Physical Safety"`).
+4. **Join (`build_dataset.py`)**: Takes the cleaned Incidents DataFrame as the spine and left-joins the flattened MIT, GMF, and CSETv1 tables on `Incident ID`. Every incident gets exactly **one row**; an incident lacking a taxonomy classification simply has blank (`NaN`) cells for it. Populates the "Data Sources" column based on which joins matched.
+5. **Export (`export_excel.py`)**: Applies `config.yaml` styling and writes the multi-sheet Excel workbook.
 
 ---
 
@@ -99,14 +99,14 @@ If a taxonomy requires custom formatting beyond basic column renaming (e.g., con
 ---
 ### Handle Upstream Schema Changes
 
-`config.yaml` mappings follow the pattern `bson_field_name: Output Column Name`. The **left side
-(key) is what the BSON contains**; the **right side (value) is what appears in the Excel output**.
-Keep this distinction in mind for every scenario below.
+`config.yaml` mappings follow the pattern `mongo_field_name: Output Column Name`. The **left side
+(key) is what the MongoDB document contains**; the **right side (value) is what appears in the Excel
+output**. Keep this distinction in mind for every scenario below.
 
-#### A field was renamed in `incidents.bson`, `reports.bson`, or `entities.bson`
+#### A field was renamed in the `incidents`, `reports`, or `entities` collection
 
 The schema check will exit with code `2`, reporting the old name as missing and the new name as a
-new column. Fix: update only the **key** in `config.yaml` to match the new BSON field name. The
+new column. Fix: update only the **key** in `config.yaml` to match the new MongoDB field name. The
 value (output column name) stays the same, so nothing else in the pipeline needs to change.
 
 ```yaml
@@ -115,13 +115,13 @@ columns:
   incidents:
     incident_id: Incident ID
 
-# After (BSON renamed incident_id -> incidentId)
+# After (field renamed incident_id -> incidentId)
 columns:
   incidents:
     incidentId: Incident ID
 ```
 
-#### A `short_name` was renamed inside `classifications.bson`
+#### A `short_name` was renamed inside the `classifications` collection
 
 Taxonomy attributes are stored as an array of `{short_name, value_json}` pairs. The `short_name`
 is the key in the `taxonomies.*.mapping` block. Update it the same way — change only the key,
@@ -141,7 +141,7 @@ taxonomies:
       AI_Goal: AI Goal
 ```
 
-#### A new field appeared in a core BSON collection
+#### A new field appeared in a core collection
 
 New fields are silently dropped — the pipeline only keeps columns present in the mapping. The
 schema check will print a notice but will not fail. To include the new field in the output:
@@ -162,7 +162,7 @@ output name to `output.column_order`.
 
 There is no automated test suite — run the pipeline end-to-end to validate changes:
 
-1. Run it: `python main.py` (add `--skip-schema-check` while iterating on snapshots whose schema is in flux).
+1. Run it: `python main.py` (requires `MONGODB_CONNECTION_STRING`; add `--skip-schema-check` while iterating when the upstream schema is in flux).
 2. A clean run exits `0` and prints `Excel written to …/output/AIID_Excel_Export.xlsx` followed by the row counts.
 3. Open `output/AIID_Excel_Export.xlsx` and confirm all five sheets are present: **Incidents, Reports, Entities, Data Dictionary, Coverage Map**.
 4. Sanity-check the row counts against the current database (recent run: ~1,496 incidents, ~7,143 reports, ~6,380 entities). Large, unexplained drops usually signal a join or cleaning regression.
@@ -173,10 +173,16 @@ There is no automated test suite — run the pipeline end-to-end to validate cha
 ## 5. Troubleshooting
 
 - **`Schema check failed. Missing columns:`**
-  A mapped key was not found in the upstream BSON. Either the field was renamed or dropped. If
+  A mapped key was not found in the upstream collection. Either the field was renamed or dropped. If
   renamed, update the key (left side) in `config.yaml` to the new field name — see
   [Handle Upstream Schema Changes](#handle-upstream-schema-changes). If dropped, remove that key
   from `config.yaml` entirely.
-  
-- **`ValueError: The file ... is 0 bytes`**
-  The backup archive is corrupted or the database export failed upstream. Verify the snapshot hosted on Cloudflare R2.
+
+- **`RuntimeError: MongoDB connection string is not set`**
+  `MONGODB_CONNECTION_STRING` (or `MONGODB_URI`) is not exported. Provide an Atlas `mongodb+srv://…`
+  URI with read access to `aiidprod`.
+
+- **`pymongo.errors.ServerSelectionTimeoutError` / authentication errors**
+  The pipeline could not reach the database, or the credentials lack read access. Verify the
+  connection string, that the user has read access to `aiidprod`, and that the runner's IP is allowed
+  by the Atlas network access list.

@@ -36,7 +36,7 @@ jobs:
 
       - name: Build Excel export
         env:
-          SNAPSHOT_DIR: ${{ github.workspace }}/.artifacts/snapshot
+          MONGODB_CONNECTION_STRING: ${{ secrets.MONGODB_CONNECTION_STRING }}
           OUTPUT_PATH: ${{ github.workspace }}/.artifacts/AIID_Excel_Export.xlsx
         run: |
           python site/excel-export-pipeline/main.py --config site/excel-export-pipeline/config.yaml
