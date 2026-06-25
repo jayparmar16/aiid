@@ -15,7 +15,7 @@ const UniqueSubmittersLeaderboard = ({ limit = 0, className = '' }) => {
           reports {
             report_number
             submitters
-            date_submitted
+            is_incident_report
           }
         }
       }
@@ -26,6 +26,8 @@ const UniqueSubmittersLeaderboard = ({ limit = 0, className = '' }) => {
 
   incidents.forEach((incident) => {
     incident.reports.forEach((report) => {
+      if (!report.is_incident_report) return;
+
       const {
         submitters: [submitter],
       } = report;

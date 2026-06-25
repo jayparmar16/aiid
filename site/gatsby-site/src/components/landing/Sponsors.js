@@ -7,6 +7,7 @@ import { Button, Card, Modal } from 'flowbite-react';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faQuoteLeft } from '@fortawesome/free-solid-svg-icons';
 import { GatsbyImage } from 'gatsby-plugin-image';
+import { graphql, useStaticQuery } from 'gatsby';
 import { PrismicRichText } from '@prismicio/react';
 import { useLocalization } from 'plugins/gatsby-theme-i18n';
 import sponsorsJson from './sponsors.json';
@@ -37,7 +38,7 @@ const SponsorModal = ({ setModalState, modalState, modalName, children, title, l
           </div>
         ) : (
           <div className="mt-2">
-            <StyledImageModal src={`/images/${logo}`} linkTo={linkTo} />
+            <StyledImageModal src={logo?.url ? logo.url : `/images/${logo}`} linkTo={linkTo} />
           </div>
         )}
       </Modal.Body>
@@ -52,14 +53,55 @@ const SponsorModal = ({ setModalState, modalState, modalName, children, title, l
   );
 };
 
-export default function Sponsors({ sponsors = [] }) {
+export default function Sponsors() {
   const [modalState, setModalState] = useState('close');
 
   const { locale } = useLocalization();
 
   const { t } = useTranslation(['sponsors']);
 
-  sponsors = sponsors
+  // Prismic is the single source of truth for sponsors. Every place that renders this
+  // component (landing page, about page, Prismic docs) shares this query, so they stay
+  // in sync. When Prismic has no sponsors for the active locale we fall back to the
+  // bundled sponsors.json.
+  const data = useStaticQuery(graphql`
+    query SponsorsQuery {
+      allPrismicSponsor(sort: { data: { order: { text: ASC } } }) {
+        edges {
+          node {
+            data {
+              title {
+                text
+              }
+              order {
+                text
+              }
+              language {
+                text
+              }
+              items {
+                name {
+                  text
+                }
+                description {
+                  richText
+                }
+                logo {
+                  url
+                }
+                link {
+                  url
+                }
+                direct_link
+              }
+            }
+          }
+        }
+      }
+    }
+  `);
+
+  let sponsors = data.allPrismicSponsor.edges
     .filter((sponsor) => sponsor?.node?.data?.language?.text === locale)
     .map((sponsor) => {
       return {
@@ -70,6 +112,7 @@ export default function Sponsors({ sponsors = [] }) {
             richText: item.description?.richText,
             logo: item.logo,
             link: item.link.url,
+            directLink: item.direct_link ?? false,
           };
         }),
       };
@@ -153,18 +196,37 @@ export default function Sponsors({ sponsors = [] }) {
                     </h6>
                     <div className="flex justify-around gap-4 items-center">
                       {sponsor.items.map((item) => {
+                        const imageSrc = `${
+                          item.logo?.url ? item.logo.url : '/images/' + item.logo
+                        }`;
+
+                        const image = (
+                          <StyledImage
+                            src={imageSrc}
+                            onClick={() => setModalState(item.name)}
+                            data-cy={`${item.name}-modal-click`}
+                            className="max-h-[90px] ml-0 mr-0 mb-0 inline-flex"
+                          />
+                        );
+
                         return (
                           <div
                             key={`sponsor-item-${item.name}`}
                             className="flex-1 max-w-xs w-full max-h-[90px] ml-0 mr-0 text-center"
                             data-cy={`${item.name}-image`}
                           >
-                            <StyledImage
-                              src={`${item.logo?.url ? item.logo.url : '/images/' + item.logo}`}
-                              onClick={() => setModalState(item.name)}
-                              data-cy={`${item.name}-modal-click`}
-                              className="max-h-[90px] ml-0 mr-0 mb-0 inline-flex"
-                            />
+                            {item.directLink ? (
+                              <a
+                                href={item.link}
+                                target="_blank"
+                                rel="noreferrer"
+                                data-cy={`${item.name}-link-click`}
+                              >
+                                {image}
+                              </a>
+                            ) : (
+                              image
+                            )}
                           </div>
                         );
                       })}
