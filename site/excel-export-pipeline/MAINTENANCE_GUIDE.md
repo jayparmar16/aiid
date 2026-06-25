@@ -52,7 +52,7 @@ here.
 ## 2. Pipeline Execution Steps
 
 1. **Connect & Load (`load_data.py`)**: Connects to the `aiidprod` MongoDB database (via `MONGODB_CONNECTION_STRING`) and reads the `incidents`, `reports`, `entities`, `duplicates`, and `classifications` collections into Pandas DataFrames. Flattens the classifications based on `taxonomies` defined in the YAML — filters by namespace (MIT, GMF, CSETv1) and pivots each document's `attributes` array so every `short_name` becomes a standard column.
-2. **Schema Check (`schema_check.py`)**: Header-level check that the columns mapped in `config.yaml` still exist in the upstream collections, catching schema drift before any heavy processing (exits with code `2` on a mismatch; bypass with `--skip-schema-check`).
+2. **Schema Check (`schema_check.py`)**: Advisory header-level check comparing the columns mapped in `config.yaml` against the upstream collections. It **warns** about drift (mapped columns now missing, and new unmapped columns that appeared) and the run **continues** — it never aborts or changes the exit code. Bypass the report entirely with `--skip-schema-check`.
 3. **Clean (`clean.py`)**: Formats dates into standardized formats, purges incident IDs found in the `duplicates` collection from all datasets (preventing ghost records), parses JSON-like string arrays into readable strings (e.g. `["navya", "keolis"]` → `"Navya, Keolis"`), and strips numeric prefixes from MIT labels (e.g. `"1. Physical Safety"` → `"Physical Safety"`).
 4. **Join (`build_dataset.py`)**: Takes the cleaned Incidents DataFrame as the spine and left-joins the flattened MIT, GMF, and CSETv1 tables on `Incident ID`. Every incident gets exactly **one row**; an incident lacking a taxonomy classification simply has blank (`NaN`) cells for it. Populates the "Data Sources" column based on which joins matched.
 5. **Export (`export_excel.py`)**: Applies `config.yaml` styling and writes the multi-sheet Excel workbook.
@@ -105,9 +105,10 @@ output**. Keep this distinction in mind for every scenario below.
 
 #### A field was renamed in the `incidents`, `reports`, or `entities` collection
 
-The schema check will exit with code `2`, reporting the old name as missing and the new name as a
-new column. Fix: update only the **key** in `config.yaml` to match the new MongoDB field name. The
-value (output column name) stays the same, so nothing else in the pipeline needs to change.
+The schema check will **warn** (it no longer aborts), reporting the old name as missing and the new
+name as a new column; that column is simply dropped from the output until you fix the mapping. Fix:
+update only the **key** in `config.yaml` to match the new MongoDB field name. The value (output column
+name) stays the same, so nothing else in the pipeline needs to change.
 
 ```yaml
 # Before
@@ -162,21 +163,23 @@ output name to `output.column_order`.
 
 There is no automated test suite — run the pipeline end-to-end to validate changes:
 
-1. Run it: `python main.py` (requires `MONGODB_CONNECTION_STRING`; add `--skip-schema-check` while iterating when the upstream schema is in flux).
-2. A clean run exits `0` and prints `Excel written to …/output/AIID_Excel_Export.xlsx` followed by the row counts.
+1. Run it: `python main.py` (requires `MONGODB_CONNECTION_STRING`; add `--skip-schema-check` to silence the advisory schema report).
+2. A clean run exits `0` and prints `Excel written to …/output/AIID_Excel_Export.xlsx` followed by the row counts. Any schema drift is printed as warnings but does **not** change the exit code.
 3. Open `output/AIID_Excel_Export.xlsx` and confirm all five sheets are present: **Incidents, Reports, Entities, Data Dictionary, Coverage Map**.
 4. Sanity-check the row counts against the current database (recent run: ~1,496 incidents, ~7,143 reports, ~6,380 entities). Large, unexplained drops usually signal a join or cleaning regression.
-5. Treat the exit code as the verdict — `2` = schema check failed (see [Exit Codes](README.md#exit-codes) and Troubleshooting below).
+5. Exit `0` = success; a non-zero exit (typically `1`) means an uncaught error such as a failed Mongo connection (see [Exit Codes](README.md#exit-codes) and Troubleshooting below).
 
 ---
 
 ## 5. Troubleshooting
 
-- **`Schema check failed. Missing columns:`**
-  A mapped key was not found in the upstream collection. Either the field was renamed or dropped. If
-  renamed, update the key (left side) in `config.yaml` to the new field name — see
-  [Handle Upstream Schema Changes](#handle-upstream-schema-changes). If dropped, remove that key
-  from `config.yaml` entirely.
+- **`::warning::Schema drift — mapped columns absent upstream`**
+  Advisory only — the run continues and those columns are dropped from the output. A mapped key was not
+  found in the upstream collection: the field was renamed or dropped. If renamed, update the key (left
+  side) in `config.yaml` to the new field name — see
+  [Handle Upstream Schema Changes](#handle-upstream-schema-changes). If dropped, remove that key from
+  `config.yaml`. New unmapped columns are also listed — add them to `config.yaml` if you want them in
+  the output.
 
 - **`RuntimeError: MongoDB connection string is not set`**
   `MONGODB_CONNECTION_STRING` (or `MONGODB_URI`) is not exported. Provide an Atlas `mongodb+srv://…`

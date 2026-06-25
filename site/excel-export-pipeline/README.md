@@ -12,7 +12,7 @@ Builds the AI Incident Database Excel Export: a multi-sheet Excel workbook joini
 
 1. Connects to the live MongoDB `aiidprod` database (the same source the weekly DB backup uses).
 2. Reads 5 core collections: `incidents`, `reports`, `entities`, `classifications`, `duplicates`.
-3. Validates the configured schema mapping against the live collections.
+3. Reports any schema drift between the config mapping and the live collections (advisory — does not block the run).
 4. Cleans and normalises each data source (deduplicates, renames columns, parses arrays).
 5. Dynamically flattens the `classifications` collection based on namespaces defined in `config.yaml`.
 6. Left-joins taxonomies onto the incident spine, guaranteeing one row per incident.
@@ -41,7 +41,17 @@ main.py  ←  entry point, orchestrates all stages
 
 **Prerequisites:**
 - Python 3.11+ (developed on 3.11; CI pins 3.11; also runs on 3.13).
-- **A MongoDB connection string** with read access to the `aiidprod` database, provided via the `MONGODB_CONNECTION_STRING` environment variable (an Atlas `mongodb+srv://…` URI — the same secret the weekly DB backup uses). The pipeline reads live data directly, so it cannot run without this.
+- A MongoDB to read from. For local runs the simplest is the site's seeded **in-memory MongoDB** (step 1) — no credentials needed.
+
+**1. Start the in-memory MongoDB** in one terminal — it seeds the `aiidprod` collections on `mongodb://127.0.0.1:4110/`. Leave it running:
+
+```bash
+cd site/gatsby-site
+npm install                 # first time only
+npm run start:memory-mongo
+```
+
+**2. Run the pipeline** in a second terminal, pointed at that local database:
 
 ```bash
 cd site/excel-export-pipeline
@@ -53,21 +63,21 @@ source .venv/bin/activate        # Windows: .venv\Scripts\Activate.ps1
 # Install dependencies
 pip install -r requirements.txt
 
-# Provide read access to the database (Atlas SRV URI)
-export MONGODB_CONNECTION_STRING="mongodb+srv://<user>:<pass>@<cluster>.mongodb.net"
-# Windows PowerShell: $env:MONGODB_CONNECTION_STRING = "mongodb+srv://..."
+# Point at the local in-memory MongoDB
+export MONGODB_CONNECTION_STRING="mongodb://127.0.0.1:4110/"
+# Windows PowerShell: $env:MONGODB_CONNECTION_STRING = "mongodb://127.0.0.1:4110/"
 
 # Run with default config
 python main.py
 
-# Skip schema validation (useful when the upstream schema is in flux)
+# Skip the advisory schema report
 python main.py --skip-schema-check
 
 # Point to a different config file
 python main.py --config path/to/config.yaml
 ```
 
-Output is written to `../../output/AIID_Excel_Export.xlsx` by default. A local run **only writes this file** — it does not upload to Cloudflare R2 (that happens in CI only). `requirements.txt` covers the local build; the CI upload step additionally needs `boto3`, which is installed by the workflow rather than listed here.
+Output is written to `../../output/AIID_Excel_Export.xlsx` by default (a local run only writes this file — it never uploads to Cloudflare R2, which is CI-only). The in-memory database holds only sample seed data (a handful of incidents), so a local run verifies the pipeline works rather than producing the real dataset. To build against production instead, set `MONGODB_CONNECTION_STRING` to an Atlas `mongodb+srv://…` URI with read access to `aiidprod` (this is what CI uses).
 
 ---
 
@@ -166,12 +176,10 @@ The build step needs `MONGODB_CONNECTION_STRING`; the upload step needs the Clou
 
 | Code | Meaning |
 |---|---|
-| `0` | Success — Excel file written |
-| `1`* | Uncaught exception — missing connection string, MongoDB connection failure, etc. |
-| `2` | Schema check failed — missing mapped columns in upstream collections |
+| `0` | Success — Excel file written (this is the only code `main.py` returns deliberately) |
+| `1` | Uncaught exception — missing connection string, MongoDB connection failure, etc. |
 
-\* `main.py` only ever *returns* `0` or `2` deliberately; any other failure surfaces as a non-zero exit (typically `1`) from an uncaught Python exception, so don't write CI logic that depends on a guaranteed `1`.
-
+`main.py` only ever *returns* `0`. The schema check is **advisory** as it prints drift as warnings and never changes the exit code. 
 ---
 
 ## Contributing & License

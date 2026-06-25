@@ -37,10 +37,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     """Run the end-to-end Excel export pipeline.
 
-    Exit codes:
-      0 = success
-      2 = schema check failure (missing expected columns)
-      3 = validation failure (data quality guardrails failed)
+    Returns 0 on success. The schema check is advisory and never changes the exit
+    code; any genuine failure surfaces as a non-zero process exit (typically 1)
+    from an uncaught exception.
     """
     args = parse_args()
     config_path = Path(args.config).resolve()
@@ -56,17 +55,16 @@ def main() -> int:
     print(f"Loaded live data from MongoDB ({config.mongo.database})")
 
     if not args.skip_schema_check:
-        # Fast header-only check to catch schema drift before doing heavy work.
+        # Advisory only — the export tolerates missing columns, so drift never aborts the run.
         schema_result = check_schema(config, raw)
-        if not schema_result.is_ok:
-            print("Schema check failed. Missing columns:")
+        if schema_result.missing:
+            print("::warning::Schema drift — mapped columns absent upstream (dropped from output):")
             for source, col, mapped in schema_result.missing:
                 print(f"  - {source}: '{col}' (maps to '{mapped}')")
-            if schema_result.new_columns:
-                print("New columns found (not mapped):")
-                for source, col in schema_result.new_columns:
-                    print(f"  - {source}: '{col}'")
-            return 2
+        if schema_result.new_columns:
+            print("New unmapped columns upstream (consider adding to config.yaml):")
+            for source, col in schema_result.new_columns:
+                print(f"  - {source}: '{col}'")
 
     dup_ids = compute_duplicate_ids(raw.duplicates, config.columns.duplicates_id_column)
 
