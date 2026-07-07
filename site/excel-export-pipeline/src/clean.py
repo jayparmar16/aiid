@@ -6,10 +6,6 @@ from typing import Dict
 
 from .config import PipelineConfig
 
-CLEANING_HOOKS = {
-    "MIT": hook_clean_mit,
-    "CSETv1": hook_clean_cset,
-}
 
 def _parse_entity_list(val: object) -> str:
     """Parse a JSON-ish Python-literal list of entity slugs into a display string."""
@@ -120,6 +116,11 @@ def hook_clean_cset(df: pd.DataFrame) -> pd.DataFrame:
         month_map.update({f" {k}": v for k, v in month_map.items()})
         df["Incident Month"] = df["Incident Month"].replace(month_map)
     return df
+
+CLEANING_HOOKS = {
+    "MIT": hook_clean_mit,
+    "CSETv1": hook_clean_cset,
+}
 
 def clean_taxonomies(tax_data: dict[str, pd.DataFrame], config: PipelineConfig, dup_ids: set[int]) -> dict[str, pd.DataFrame]:
     """Clean all configured taxonomies using the registry hooks."""
