@@ -15,6 +15,19 @@ class PathsConfig:
 
 
 @dataclass
+class ThemeConfig:
+    """Workbook-wide presentation theme (font + shared colors)."""
+
+    font: str
+    banner_color: str
+    white: str
+    alt_fill: str
+    border_color: str
+    total_fill: str
+    generic_header: str
+
+
+@dataclass
 class MongoConfig:
     """Settings for connecting to the live MongoDB database."""
 
@@ -49,6 +62,7 @@ class OutputConfig:
     column_order: List[str]
     reports_column_order: List[str]
     entities_column_order: List[str]
+    column_widths: Dict[str, int]
 
 
 @dataclass
@@ -69,6 +83,9 @@ class PipelineConfig:
     taxonomies: Dict[str, TaxonomyConfig]
     styles: Dict[str, StyleConfig]
     output: OutputConfig
+    theme: ThemeConfig
+    column_descriptions: Dict[str, str]
+    coverage_analysis: Dict[str, str]
 
 
 def _apply_env_overrides(raw: dict) -> dict:
@@ -127,7 +144,10 @@ def load_config(path: Path) -> PipelineConfig:
         column_order=list(raw["output"]["column_order"]),
         reports_column_order=list(raw["output"].get("reports_column_order", [])),
         entities_column_order=list(raw["output"].get("entities_column_order", [])),
+        column_widths=dict(raw["output"].get("column_widths", {})),
     )
+
+    theme = ThemeConfig(**raw["theme"])
 
     return PipelineConfig(
         paths=paths,
@@ -136,4 +156,7 @@ def load_config(path: Path) -> PipelineConfig:
         taxonomies=taxonomies,
         styles=styles,
         output=output,
+        theme=theme,
+        column_descriptions=dict(raw.get("column_descriptions", {})),
+        coverage_analysis=dict(raw.get("coverage_analysis", {})),
     )
