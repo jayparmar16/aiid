@@ -88,3 +88,8 @@ output/
 
 
 data/db_dump/
+# Local credential helper - contains live Cloudflare R2 write keys, never commit
+scripts/set-r2-env.ps1
+
+# Local DB backup archives
+backup-*.tar.bz2
