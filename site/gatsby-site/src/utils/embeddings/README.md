@@ -82,7 +82,7 @@ triggered manually: open the Actions tab, select the workflow, and choose "Run w
 
 | Field | Required | Notes |
 |---|---|---|
-| `environment` | Yes | Which GitHub environment to load secrets and variables from, and therefore **which database gets written to**. Use `production` or `staging`. |
+| `environment` | Yes | Which GitHub environment to load secrets and variables from, and therefore **which database gets written to**. It must name an environment that already exists under Settings, Environments. There is no default, so that the target database is always an explicit choice. |
 | `limit` | No | Process at most this many incidents. Blank means all. |
 | `resume` | No | Tick to skip incidents already embedded with the current model. |
 
@@ -94,6 +94,115 @@ Whether the run passes or fails, the job uploads `embed-failures.json` as an art
 named `embed-failures` if the script produced one. If a run fails, download that artifact
 to see which incidents failed and why, then re-run with `resume` ticked.
 
+If you have not run this workflow before, follow
+[Testing The Workflow](#testing-the-workflow) below, which covers the setup that a first
+run needs and how to confirm it worked.
+
+## Testing The Workflow
+
+### Before the first run
+
+1. **The workflow file must be on the default branch.** GitHub only shows a "Run workflow"
+   button for `workflow_dispatch` workflows that exist on the repository default branch,
+   which is `main` here. Once it is there you can still target any branch from the branch
+   selector, but until then the workflow does not appear in the Actions tab at all.
+2. **Create a GitHub environment** under Settings, Environments. The `environment` input
+   has no default, so it must name one that exists. Point the first one at a test database
+   rather than production.
+3. **Add `MONGODB_CONNECTION_STRING`** as a secret on that environment. The user needs the
+   `readWrite` role on `aiidprod`, because the script creates a unique index and upserts
+   documents. A read-only user is enough for some other pipelines in this repo but not for
+   this one.
+4. **Add `EMBEDDING_API_KEY`** as a secret on the same environment.
+5. **Allow the runner through your database firewall.** GitHub-hosted runners have dynamic
+   addresses, so an Atlas cluster needs `0.0.0.0/0` under Network Access or an allowlist
+   built from GitHub's published IP ranges. A run that hangs and then times out while
+   connecting is nearly always this.
+6. Everything else is optional. Every remaining setting has a working default.
+
+### The first run
+
+Run the workflow with `environment` set to your test environment, `limit` set to `5`, and
+`resume` unticked. Five incidents exercises the whole path, including chunking and the
+database write, and spends five requests.
+
+### What a healthy log looks like
+
+```
+------------------------------------------------------------------------
+base url    https://openrouter.ai/api/v1
+model       nvidia/nemotron-3-embed-1b:free
+writing to  aiidprod.incident_embeddings
+limits      max_input_chars=8000 timeout=2m00s max_attempts=6
+concurrency 2
+incidents   5
+------------------------------------------------------------------------
+[1/5] incident 1 ok chunks=10 chars=72787 dims=2048 attempts=1 1.2s
+[2/5] incident 2 ok chunks=7 chars=48196 dims=2048 attempts=1 0.9s
+...
+------------------------------------------------------------------------
+succeeded   5/5
+failed      0
+retried     0
+chunked     5 incident(s), 43 chunk(s) total
+wall time   6.1s
+latency     avg=1.1s
+------------------------------------------------------------------------
+```
+
+Three things are worth reading before anything else. The banner confirms which endpoint,
+model and collection the run actually used, so it catches a misconfigured setting straight
+away. Every incident line should report `dims=2048`, since a different number means the
+model changed. The summary should show `succeeded 5/5` with `failed 0`, and the job exits
+non-zero if anything failed.
+
+### Confirming the vectors landed
+
+Connect to the test database with mongosh or Compass and check the three things the log
+cannot prove:
+
+```js
+use aiidprod
+
+// One document per incident, so five after the first run.
+db.incident_embeddings.countDocuments()
+
+// Stored metadata should match the banner from the log.
+db.incident_embeddings.findOne({}, { vector: 0 })
+
+// Vectors are normalised, so this is 1 give or take floating point error.
+const v = db.incident_embeddings.findOne({}, { vector: 1 }).vector
+Math.sqrt(v.reduce((sum, x) => sum + x * x, 0))
+```
+
+Then run the workflow a second time with the same `limit` of 5. The count should still be
+5, because writes are upserts keyed on `incident_id`, and `generated_at` should have moved
+forward. That confirms a re-run overwrites cleanly and cannot accumulate duplicates.
+
+### When it fails
+
+Read the last few log lines first, because the script prints the reason it stopped and the
+command to resume. Download the `embed-failures` artifact from the run summary for the
+per-incident detail, then re-run with `resume` ticked once the cause is fixed.
+
+| Symptom | Cause |
+|---|---|
+| `MONGODB_CONNECTION_STRING is required` | The secret is not set on the environment you selected |
+| Hangs, then times out while connecting | The database firewall does not allow the runner |
+| `not authorized on aiidprod` | The database user lacks the `readWrite` role |
+| `EMBEDDING_API_KEY is required` | The secret is not set on the environment you selected |
+| `Rate limit exceeded: free-models-per-day` | The free tier daily ceiling, which resets at midnight UTC |
+| `base url ***` or `model ***` in the banner | That setting was stored as a secret, so GitHub masked it |
+
+### Running the whole corpus
+
+The free tier allows 50 requests per day and the corpus needs roughly 1,550, one request
+per incident. A full backfill therefore cannot finish in a single run on the free tier.
+Three ways forward: run with `resume` ticked once a day until it completes, add credits to
+raise the daily ceiling, or switch to a paid model as described in
+[Changing The Model Or Provider](#changing-the-model-or-provider). Every finished incident
+is already stored, so stopping and resuming costs nothing.
+
 ## Configuration
 
 Everything is set through the environment. Locally that means `.env`; in CI it means
@@ -103,15 +212,20 @@ secrets and variables on the GitHub environment named by the `environment` input
 |---|---|---|---|
 | `MONGODB_CONNECTION_STRING` | secret | none, required | Read and write access to the `aiidprod` database. |
 | `EMBEDDING_API_KEY` | secret | none, required | Bearer token for the embedding endpoint. |
-| `EMBEDDING_API_BASE_URL` | variable | `https://openrouter.ai/api/v1` | Base URL of an OpenAI-compatible embeddings API. |
-| `EMBEDDING_MODEL` | variable | `nvidia/nemotron-3-embed-1b:free` | Model identifier, passed straight through. |
-| `EMBEDDING_MAX_INPUT_CHARS` | variable | `8000` | Chunk size in characters. See the note below. |
-| `EMBEDDING_CONCURRENCY` | variable | `2` | Incidents embedded in parallel. This is the main pacing control against a rate-limited endpoint. |
-| `EMBEDDING_TIMEOUT_MS` | variable | `120000` | Per-request timeout. |
-| `EMBEDDING_MAX_ATTEMPTS` | variable | `6` | Attempts per request before giving up on an incident. |
+| `EMBEDDING_API_BASE_URL` | variable or secret | `https://openrouter.ai/api/v1` | Base URL of an OpenAI-compatible embeddings API. |
+| `EMBEDDING_MODEL` | variable or secret | `nvidia/nemotron-3-embed-1b:free` | Model identifier, passed straight through. |
+| `EMBEDDING_MAX_INPUT_CHARS` | variable or secret | `8000` | Chunk size in characters. See the note below. |
+| `EMBEDDING_CONCURRENCY` | variable or secret | `2` | Incidents embedded in parallel. This is the main pacing control against a rate-limited endpoint. |
+| `EMBEDDING_TIMEOUT_MS` | variable or secret | `120000` | Per-request timeout. |
+| `EMBEDDING_MAX_ATTEMPTS` | variable or secret | `6` | Attempts per request before giving up on an incident. |
 
 The defaults are the settings that work against the current model, so a run needs nothing
 but the two secrets.
+
+The two credentials must be secrets. The other six are read from a repository or
+environment variable first and a secret second, so either place works. Setting one as a
+secret means GitHub masks it, and the startup banner then prints `model ***` instead of the
+model name, which costs you the clearest signal that a run picked up the config you meant.
 
 `EMBEDDING_MAX_INPUT_CHARS` is worth understanding before changing it. The real limit is
 in tokens, not characters, and the ratio varies from roughly 4 characters per token for

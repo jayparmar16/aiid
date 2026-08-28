@@ -47,15 +47,18 @@ jobs:
             ${{ inputs.limit && format('--limit {0}', inputs.limit) || '' }} \
             ${{ inputs.resume == true && '--resume' || '' }}
         working-directory: site/gatsby-site
+        # The two credentials are secrets only. Everything below reads from a variable
+        # first and a secret second, so either place works, and a value set as a secret
+        # is masked in the log. Unset on both falls back to the code default.
         env:
           MONGODB_CONNECTION_STRING: ${{ secrets.MONGODB_CONNECTION_STRING }}
           EMBEDDING_API_KEY: ${{ secrets.EMBEDDING_API_KEY }}
-          EMBEDDING_API_BASE_URL: ${{ vars.EMBEDDING_API_BASE_URL }}
-          EMBEDDING_MODEL: ${{ vars.EMBEDDING_MODEL }}
-          EMBEDDING_CONCURRENCY: ${{ vars.EMBEDDING_CONCURRENCY }}
-          EMBEDDING_TIMEOUT_MS: ${{ vars.EMBEDDING_TIMEOUT_MS }}
-          EMBEDDING_MAX_ATTEMPTS: ${{ vars.EMBEDDING_MAX_ATTEMPTS }}
-          EMBEDDING_MAX_INPUT_CHARS: ${{ vars.EMBEDDING_MAX_INPUT_CHARS }}
+          EMBEDDING_API_BASE_URL: ${{ vars.EMBEDDING_API_BASE_URL || secrets.EMBEDDING_API_BASE_URL }}
+          EMBEDDING_MODEL: ${{ vars.EMBEDDING_MODEL || secrets.EMBEDDING_MODEL }}
+          EMBEDDING_CONCURRENCY: ${{ vars.EMBEDDING_CONCURRENCY || secrets.EMBEDDING_CONCURRENCY }}
+          EMBEDDING_TIMEOUT_MS: ${{ vars.EMBEDDING_TIMEOUT_MS || secrets.EMBEDDING_TIMEOUT_MS }}
+          EMBEDDING_MAX_ATTEMPTS: ${{ vars.EMBEDDING_MAX_ATTEMPTS || secrets.EMBEDDING_MAX_ATTEMPTS }}
+          EMBEDDING_MAX_INPUT_CHARS: ${{ vars.EMBEDDING_MAX_INPUT_CHARS || secrets.EMBEDDING_MAX_INPUT_CHARS }}
 
       # Uploaded even on failure, because that is when the manifest is worth reading.
       - name: Upload failure manifest
