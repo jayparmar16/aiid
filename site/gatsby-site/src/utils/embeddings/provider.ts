@@ -6,12 +6,24 @@
  * Pointing EMBEDDING_API_BASE_URL and EMBEDDING_MODEL elsewhere is the whole vendor swap.
  */
 
+/**
+ * What a successful embedding call returns. The vectors come back in the same order as the
+ * texts that were sent. The attempt count and latency are recorded so the runner can report
+ * how much retrying a run needed.
+ */
 export interface EmbedResult {
   vectors: number[][];
+  /** Total attempts spent on this call, including the successful one. */
   attempts: number;
+  /** Wall time of the successful request in milliseconds. */
   latencyMs: number;
 }
 
+/**
+ * A configured embedding endpoint that the runner can call. The model and base URL are
+ * exposed so they can be logged and stored alongside every vector. The timeout and attempt
+ * limit are exposed so the startup banner can report them.
+ */
 export interface EmbeddingProvider {
   model: string;
   baseUrl: string;
@@ -20,6 +32,11 @@ export interface EmbeddingProvider {
   embed: (texts: string[]) => Promise<EmbedResult>;
 }
 
+/**
+ * An embedding request that failed in a way the caller needs details about. It carries the
+ * HTTP status, the response body, and how many attempts were spent, so a failure can be
+ * recorded in the manifest without re-parsing the message.
+ */
 export class EmbeddingRequestError extends Error {
   status: number | null;
 
@@ -56,24 +73,35 @@ const MAX_BACKOFF_MS = 60_000;
 // The longest Retry-After the run will honour before it gives up and stops.
 const MAX_RETRY_AFTER_MS = MAX_BACKOFF_MS;
 
+// Reads a positive number from an environment value, falling back when it is unset or invalid.
 const number = (value: string | undefined, fallback: number): number => {
   const parsed = Number(value);
 
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 
+// Pauses for the given number of milliseconds.
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Formats milliseconds as whole seconds for log messages.
 const seconds = (ms: number) => `${Math.round(ms / 1000)}s`;
 
-// Jitter stops the workers retrying at the same moment and re-triggering the limit.
+/**
+ * How long to wait before the next attempt, doubling with each one up to a ceiling. The
+ * result carries plus or minus twenty percent of jitter, which stops concurrent workers
+ * retrying at the same moment and re-triggering the same rate limit together.
+ */
 const backoffDelay = (attempt: number): number => {
   const base = Math.min(BASE_BACKOFF_MS * Math.pow(2, attempt - 1), MAX_BACKOFF_MS);
 
   return Math.round(base * (0.8 + Math.random() * 0.4));
 };
 
-/** Parses a Retry-After header in either delta-seconds or HTTP-date form. */
+/**
+ * Parses a Retry-After header in either delta-seconds or HTTP-date form. Returns the wait
+ * in milliseconds, or null when the header is absent or unparseable. A date already in the
+ * past clamps to zero.
+ */
 export const parseRetryAfter = (value: string | null): number | null => {
   // An explicit check because "0" is falsy in JavaScript and legally means retry now.
   if (value === null || value.trim() === '') return null;
@@ -89,6 +117,11 @@ export const parseRetryAfter = (value: string | null): number | null => {
   return Math.max(0, date - Date.now());
 };
 
+/**
+ * Builds a provider from the EMBEDDING_* environment variables. Every setting except the
+ * API key has a default that works against the configured model, so a caller normally only
+ * needs to supply EMBEDDING_API_KEY. Throws immediately when that key is missing.
+ */
 export const createEmbeddingProvider = (): EmbeddingProvider => {
   // Trailing slashes are stripped so joining "/embeddings" below cannot double up.
   const baseUrl = (process.env.EMBEDDING_API_BASE_URL || 'https://openrouter.ai/api/v1').replace(
@@ -106,6 +139,12 @@ export const createEmbeddingProvider = (): EmbeddingProvider => {
   const timeoutMs = number(process.env.EMBEDDING_TIMEOUT_MS, 120_000);
   const maxAttempts = number(process.env.EMBEDDING_MAX_ATTEMPTS, 6);
 
+  /**
+   * Sends all texts in one request and returns one vector per text. Retryable failures are
+   * attempted again with exponential backoff until maxAttempts is reached, while a status
+   * the server will keep rejecting fails straight away. Throws EmbeddingRequestError when
+   * no attempt succeeds.
+   */
   const embed = async (texts: string[]): Promise<EmbedResult> => {
     // Carried across attempts so the final error can report what actually went wrong.
     let lastStatus: number | null = null;

@@ -5,12 +5,17 @@
  * reached through the `incidents.reports` array of report_number join keys.
  */
 
-// Both carry an index signature so raw driver documents satisfy them without a cast.
+/**
+ * The incident fields
+ */
 export type IncidentTextSource = {
   title?: string | null;
   [key: string]: unknown;
 };
 
+/**
+ * The report fields
+ */
 export type ReportTextSource = {
   report_number?: number | null;
   plain_text?: string | null;
@@ -18,7 +23,11 @@ export type ReportTextSource = {
   [key: string]: unknown;
 };
 
-/** Joins the title and every report body into the text to embed. */
+/**
+ * Joins the incident title and every report body into the single string that gets embedded.
+ * Reports are sorted by report_number first, so the same incident always produces identical
+ * text and therefore an identical vector. Empty titles and empty bodies are dropped.
+ */
 export const buildIncidentText = (
   incident: IncidentTextSource,
   reports: readonly ReportTextSource[]
@@ -48,6 +57,7 @@ export const chunkText = (text: string, maxChars: number): string[] => {
   const chunks: string[] = [];
   let current = '';
 
+  // Moves the buffered paragraphs into a finished chunk and starts a new buffer.
   const flush = () => {
     if (current.length > 0) {
       chunks.push(current);
@@ -85,10 +95,6 @@ export const chunkText = (text: string, maxChars: number): string[] => {
 
 /**
  * Component-wise mean of the chunk vectors, then L2-normalised.
- *
- * Same averaging as `server/fields/common.ts:incidentEmbedding`, which pools sibling
- * report vectors into an incident vector. Normalising keeps cosine similarity comparable
- * between incidents that needed different chunk counts.
  */
 export const poolVectors = (vectors: number[][]): number[] => {
   if (vectors.length === 0) throw new Error('cannot pool an empty set of vectors');
@@ -116,6 +122,11 @@ export const poolVectors = (vectors: number[][]): number[] => {
   return normalise(mean);
 };
 
+/**
+ * Scales a vector to unit length. Cosine similarity between unit vectors reduces to a dot
+ * product, so normalising here keeps later comparisons cheap and keeps incidents comparable
+ * even when they needed different numbers of chunks.
+ */
 const normalise = (vector: number[]): number[] => {
   const magnitude = Math.sqrt(vector.reduce((sum, component) => sum + component * component, 0));
 

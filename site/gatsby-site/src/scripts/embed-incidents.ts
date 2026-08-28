@@ -52,6 +52,10 @@ const formatDuration = (ms: number): string => {
   return `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, '0')}m`;
 };
 
+/**
+ * failure manifest records enough to diagnose an incident without
+ * re-running it, and the file is uploaded as an artifact by the GitHub Action.
+ */
 interface Failure {
   incident_id: number;
   attempts: number;
@@ -76,6 +80,11 @@ const argv = yargs(hideBin(process.argv))
   .alias('h', 'help')
   .parseSync();
 
+/**
+ * Runs the whole job: selects the incidents to embed, drives a pool of workers over them,
+ * and reports what happened. Returns the process exit code, which is 0 when everything
+ * succeeded, 1 on any failure or early stop, and 130 when a signal ended the run.
+ */
 const main = async () => {
   const connectionString = process.env.MONGODB_CONNECTION_STRING;
 
@@ -158,7 +167,11 @@ const main = async () => {
     /** Set when the run should stop dispatching new work: a signal or the breaker. */
     let stopReason: string | null = null;
 
-    // Written after every failure so a hard stop still leaves the list on disk.
+    /**
+     * Writes the failure manifest to disk. It runs after every single failure, so a hard stop
+     * such as Ctrl-C or an Actions timeout still leaves the list behind. Failures are rare and
+     * the file is small, so the repeated writes cost nothing.
+     */
     const flushFailures = () => {
       if (failures.length === 0) return;
 
@@ -178,6 +191,11 @@ const main = async () => {
       });
     }
 
+    /**
+     * Embeds a single incident and stores the result. It gathers the incident's reports,
+     * builds and chunks the text, calls the provider, pools the chunk vectors into one, and
+     * upserts the document. Throws on failure so the worker can record it and carry on.
+     */
     const processOne = async (incident: any) => {
       const incidentStartedAt = Date.now();
 
@@ -278,7 +296,12 @@ const main = async () => {
       );
     };
 
-    // Every worker pulls from the same shared cursor, so no two take the same incident.
+    /**
+     * Pulls incidents off the shared cursor until they run out or the run is told to stop.
+     * Several of these run concurrently, and because they all advance the same cursor no two
+     * workers ever take the same incident. A failure is recorded here and the loop carries on,
+     * so one bad incident leaves the rest of the run intact.
+     */
     const worker = async () => {
       while (cursor < incidents.length && !stopReason) {
         const incident = incidents[cursor++];

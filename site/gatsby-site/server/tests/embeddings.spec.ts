@@ -1,8 +1,15 @@
+/**
+ * Unit tests for the pure helpers behind the embedding pipeline. These cover text building,
+ * chunking, vector pooling, and Retry-After parsing, none of which touch the network or the
+ * database, so the suite runs fast and deterministically.
+ */
+
 import { describe, expect, it } from '@jest/globals';
 
 import { buildIncidentText, chunkText, poolVectors } from '../../src/utils/embeddings/incidentText';
 import { parseRetryAfter } from '../../src/utils/embeddings/provider';
 
+// Length of a vector, used to check that pooled vectors come back normalised.
 const magnitude = (vector: number[]) =>
   Math.sqrt(vector.reduce((sum, component) => sum + component * component, 0));
 
