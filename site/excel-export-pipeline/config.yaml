@@ -64,6 +64,8 @@ taxonomies:
       Known AI Goal: AI Goal
       Known AI Technology: AI Technology
       Known AI Technical Failure: Technical Failure
+      Potential AI Technology: AI Technology (Potential)
+      Potential AI Technical Failure: Technical Failure (Potential)
   CSETv1:
     color: "4A235A"
     band_label: "POLICY DETAIL - CSETv1"
@@ -104,6 +106,15 @@ taxonomies:
       Embedded: Embedded
       Entities: Entities
       Estimated Date: Estimated Date
+
+theme:
+  font: Arial
+  banner_color: "0D1B2A"
+  white: "FFFFFF"
+  alt_fill: "F5F5F5"
+  border_color: "D0D0D0"
+  total_fill: "D9E2F3"
+  generic_header: "1F3864"   # navy header for Reports/Entities/Dictionary/Coverage
 
 styles:
   Identity:
@@ -155,7 +166,9 @@ output:
     - Timing
     - AI Goal
     - AI Technology
+    - AI Technology (Potential)
     - Technical Failure
+    - Technical Failure (Potential)
     - Harm Domain
     - Tangible Harm
     - AI Harm Level
@@ -207,3 +220,62 @@ output:
   entities_column_order:
     - Entity ID
     - Name
+  column_widths:
+    Incident ID: 11
+    date: 13
+    year: 7
+    title: 40
+    description: 50
+    deployer: 25
+    developer: 25
+    harmed: 25
+    Data Sources: 22
+    report_count: 10
+    Risk Domain: 30
+    Risk Subdomain: 42
+    Responsible Entity: 16
+    Intent: 14
+    Timing: 16
+    AI Goal: 35
+    AI Technology: 30
+    Technical Failure: 35
+
+column_descriptions:
+  Incident ID: "Primary join key. Unique per incident."
+  date: "Date harm occurred (editor-resolved)."
+  year: "Year derived from date - best for time series."
+  title: "Short editor-written title of the incident."
+  description: "One to three sentence summary of what happened."
+  deployer: "Who deployed the AI. Cleaned from JSON slug format."
+  developer: "Who built the AI system."
+  harmed: "Who was harmed or nearly harmed."
+  Data Sources: "Which taxonomies classified this incident: MIT | GMF | CSETv1."
+  report_count: "Number of linked news articles."
+  Risk Domain: "High-level risk category."
+  Risk Subdomain: "Granular sub-category nested under Risk Domain."
+  Responsible Entity: "Who caused the risk: AI / Human / Other."
+  Intent: "Intentional vs Unintentional vs Other."
+  Timing: "Pre-deployment vs Post-deployment."
+  AI Goal: "What the AI was trying to do."
+  AI Technology: "ML/AI technique used."
+  AI Technology (Potential): "Candidate ML/AI technique, not yet confirmed."
+  Technical Failure: "What technically failed."
+  Technical Failure (Potential): "Candidate technical failure, not yet confirmed."
+  Harm Domain: "Whether harm occurred in a recognized domain."
+  Tangible Harm: "Level of tangible harm."
+  AI Harm Level: "AI contribution to harm severity."
+  Rights Violation: "Whether a legal or human rights violation occurred."
+  Lives Lost: "Fatality count."
+  Injuries: "Injury count."
+  Sector of Deployment: "Industry sector (ISIC classification)."
+  Location Region: "World region."
+  Country Code: "ISO 2-letter country code."
+  Intentional Harm: "Whether harm was intentionally designed into the system."
+  Autonomy Level: "Autonomy level of the system."
+
+coverage_analysis:
+  "MIT": "Risk domain trends, intent, timing, entity - broad lens"
+  "MIT | GMF": "MIT analysis plus technical failures and AI goals"
+  "MIT | GMF | CSETv1": "Full picture: risk, technical, policy, sector, geography, harm"
+  "MIT | CSETv1": "Risk plus policy: sector, lives lost, location, harm level, rights"
+  "None": "Title, description, deployer, developer, harmed, report count"

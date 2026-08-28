@@ -1,13 +1,10 @@
 import React from 'react';
 import Featured from 'components/landing/Featured';
-import Leaderboards from 'components/landing/Leaderboards';
 import Blog from 'components/landing/Blog';
 import Sponsors from 'components/landing/Sponsors';
 import AboutDatabase from 'components/landing/AboutDatabase ';
 import LatestReports from 'components/landing/LatestReports';
 import QuickSearch from 'components/landing/QuickSearch';
-import QuickAdd from 'components/landing/QuickAdd';
-import RandomIncidents from 'components/landing/RandomIncidents';
 import Hero from 'components/landing/Hero';
 import NewsletterSignup from 'components/landing/NewsletterSignup';
 import { useTranslation } from 'react-i18next';
@@ -21,7 +18,7 @@ import HeadContent from 'components/HeadContent';
 const LandingPage = (props) => {
   const { data } = props;
 
-  const { latestIncidents, latestIncidentsReportNumbers, sponsors } = props.pageContext;
+  const { latestIncidents, latestIncidentsReportNumbers } = props.pageContext;
 
   let { latestPrismicPost, latestPostOld } = data;
 
@@ -99,12 +96,6 @@ const LandingPage = (props) => {
           </div>
         )}
 
-        <div className="mb-5 md:mb-10">
-          <div className="flex flex-col items-center">
-            <QuickAdd />
-          </div>
-        </div>
-
         <div className="flex flex-col sm:flex-row md:flex-col lg:flex-row gap-5 md:gap-10 mb-5 md:mb-10 flex-wrap">
           <div className="flex-1 max-w-full sm:max-w-[50%] md:max-w-full lg:max-w-[50%]">
             <AboutDatabase />
@@ -128,25 +119,12 @@ const LandingPage = (props) => {
           </div>
         </div>
 
-        <div className="mb-10 md:mb-16">
-          <div>
-            <Leaderboards />
-          </div>
-        </div>
-
-        <div className="mb-5 md:mb-10 flex flex-col sm:flex-row md:flex-col lg:flex-row gap-5 md:gap-10 flex-wrap">
-          <div className="flex-1 lg:max-w-[50%]">
-            <NewsletterSignup />
-          </div>
-          {latestIncidents.length > 0 && (
-            <div className="flex-1 lg:max-w-[50%]">
-              <RandomIncidents />
-            </div>
-          )}
-        </div>
-
         <div>
-          <Sponsors sponsors={sponsors} />
+          <Sponsors />
+        </div>
+
+        <div className="mt-5 md:mt-10">
+          <NewsletterSignup />
         </div>
       </Container>
     </div>
@@ -198,50 +176,10 @@ export function Head({ location }) {
 
 export const query = graphql`
   query LandingPageQuery(
-    $latestReportNumber: Int
     $latestIncidentsReportNumbers: [Int]
     $locale: String!
     $latestIncidentIds: [Int]
   ) {
-    latestReportIncident: allMongodbAiidprodIncidents(
-      filter: { reports: { elemMatch: { report_number: { eq: $latestReportNumber } } } }
-    ) {
-      edges {
-        node {
-          incident_id
-        }
-      }
-    }
-    latestReportIncidents: allMongodbAiidprodIncidents(
-      filter: { reports: { elemMatch: { report_number: { in: $latestIncidentsReportNumbers } } } }
-    ) {
-      edges {
-        node {
-          incident_id
-          reports {
-            report_number
-            title
-            text
-            epoch_date_submitted
-            image_url
-            report_number
-            cloudinary_id
-            language
-            source_domain
-            url
-          }
-        }
-      }
-    }
-    latestReport: mongodbAiidprodReports(report_number: { in: $latestIncidentsReportNumbers }) {
-      title
-      text
-      epoch_date_submitted
-      image_url
-      report_number
-      cloudinary_id
-      language
-    }
     latestIncidentsReportsTranslations: allMongodbTranslationsReports(
       filter: { report_number: { in: $latestIncidentsReportNumbers } }
     ) {
@@ -269,24 +207,15 @@ export const query = graphql`
       limit: 1
     ) {
       nodes {
-        uid
-        lang
         data {
-          metatitle
-          metadescription
           slug
-          aitranslated
-          language
           title {
             text
           }
           content {
-            richText
             text
-            html
           }
           image {
-            url
             gatsbyImageData
           }
           date
@@ -303,13 +232,11 @@ export const query = graphql`
         fields {
           slug
           title
-          locale
           previewText
         }
         body
         excerpt
         frontmatter {
-          metaDescription
           slug
           date
           author

@@ -25,17 +25,9 @@ export default function Footer() {
     query FooterQuery {
       site {
         siteMetadata {
-          headerTitle
           githubUrl
           facebookUrl
           linkedInUrl
-          helpUrl
-          tweetText
-          logo {
-            link
-            image
-            mobile
-          }
         }
       }
       allPrismicFooter(sort: { data: { order: ASC } }) {
@@ -50,7 +42,6 @@ export default function Footer() {
                 }
                 path
               }
-              order
               social {
                 name
                 url {
@@ -226,7 +217,7 @@ export default function Footer() {
 
       {allPrismicFooter.edges.length <= 0 && (
         <div>
-          <h3 className="text-base mt-4">2024 - AI Incident Database</h3>
+          <h3 className="text-base mt-4">2026 - AI Incident Database</h3>
 
           <LocalizedLink to="/terms-of-use" className="tw-footer-link">
             <Trans ns="footer">Terms of use</Trans>

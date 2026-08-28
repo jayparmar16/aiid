@@ -9,15 +9,10 @@ from .load_data import RawData
 
 @dataclass
 class SchemaCheckResult:
-    """Schema check outcome: missing expected columns and newly observed columns."""
+    """Advisory schema report: mapped columns now missing upstream, and newly observed columns."""
 
     missing: List[Tuple[str, str, str]]
     new_columns: List[Tuple[str, str]]
-
-    @property
-    def is_ok(self) -> bool:
-        """True if no required columns are missing."""
-        return len(self.missing) == 0
 
 
 def check_schema(config: PipelineConfig, raw: RawData) -> SchemaCheckResult:

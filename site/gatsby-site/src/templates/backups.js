@@ -102,10 +102,11 @@ const Backups = ({ pageContext }) => {
 
           <h2 className="mb-0 order-4 md:order-2">Excel Export</h2>
           <p className="order-5 md:order-4">
-            A curated Excel file, updated weekly, that combines all incident records with their
-            taxonomy classifications (CSETv0, CSETv1, GMF, MIT). Suitable for analysis and research;
-            updated every Monday. No coding required — download and open directly in Excel or Google
-            Sheets.
+            An Excel file, updated weekly, that combines all numbered incidents with many of their
+            taxonomy classifications. Suitable for analysis and research; updated every Monday. No
+            coding required — download and open directly in Excel or Google Sheets. Not all
+            relationships can be modeled in spreadsheet form. If the spreadsheet does not provide
+            the data you require, we recommend working with the MongoDB snapshots.
           </p>
           <div className="order-6 md:order-6">
             {excelExports && excelExports.length > 0 ? (

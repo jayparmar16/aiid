@@ -25,7 +25,8 @@ def _flatten_classifications(docs: Iterable[dict], namespace: str) -> pd.DataFra
     """Filter classification docs by namespace and flatten their attributes into columns."""
     rows = []
     for doc in docs:
-        if doc.get("namespace") == namespace:
+        # Only published classifications
+        if doc.get("namespace") == namespace and doc.get("publish"):
             # We want one row per incident mapped to this classification document
             incidents = doc.get("incidents", [])
             for inc_id in incidents:

@@ -8,44 +8,13 @@ export interface SendBulkEmailParams {
     recipients: {
         email: string;
         userId?: string;
+        // Per-recipient subject override; falls back to the shared `subject` below.
+        subject?: string;
+        // Per-recipient overrides; merged on top of the shared dynamicData below.
+        dynamicData?: Record<string, any>;
     }[];
     subject: string;
-    dynamicData?: {
-        incidentId?: string;
-        incidentTitle?: string;
-        incidentUrl?: string;
-        incidentDescription?: string;
-        incidentDate?: string;
-        developers?: string;
-        deployers?: string;
-        entitiesHarmed?: string;
-        implicatedSystems?: string;
-        reportUrl?: string;
-        reportTitle?: string;
-        reportAuthor?: string;
-        entityName?: string;
-        entityUrl?: string;
-        magicLink?: string;    // URL for magic link (optional)
-        newIncidents?: {
-            id: number;
-            title: string;
-            url: string;
-            date: string;
-            description: string;
-        }[];
-        newBlogPosts?: {
-            title: string;
-            url: string;
-            date: string;
-            description: string;
-        }[];
-        updates?: {
-            title: string;
-            url: string;
-            date: string;
-            description: string;
-        }[];
-    };
+    dynamicData?: Record<string, any>;
     templateId: string; // Email template ID
 }
 
@@ -57,7 +26,7 @@ export const replacePlaceholdersWithAllowedKeys = (template: string, data: any =
 
 let bulkLimiter = new RateLimiter({
     tokensPerInterval: 10,
-    interval: "second",
+    interval: "minute",
 });
 
 /**
@@ -91,6 +60,24 @@ export const setLimiter = (limiter: RateLimiter) => {
  *   }
  * ]);
  */
+// MailerSend's bulk endpoint rejects requests with more than 500 email objects (#MS42229).
+export const MAILERSEND_BULK_CHUNK_SIZE = 500;
+
+// MailerSend's per-account quota is a 60s sliding window, so a one-minute wait
+// is the minimum that reliably clears it.
+const RATE_LIMIT_RETRY_DELAY_MS = 60_000;
+
+const sendWithRateLimitRetry = async <T>(fn: () => Promise<T>): Promise<T> => {
+    try {
+        return await fn();
+    } catch (error: any) {
+        if (error?.statusCode !== 429) throw error;
+        console.warn(`MailerSend 429; retrying after ${RATE_LIMIT_RETRY_DELAY_MS}ms`);
+        await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_RETRY_DELAY_MS));
+        return await fn();
+    }
+};
+
 export const mailersendBulkSend = async (emails: EmailParams[]) => {
 
     const mailersend = new MailerSend({
@@ -100,9 +87,13 @@ export const mailersendBulkSend = async (emails: EmailParams[]) => {
     assert(emails.every(email => email.to.length == 1), 'Emails must have exactly one recipient');
     assert(emails.every(email => !email.cc), 'Should not use the "cc" field');
 
-    await bulkLimiter.removeTokens(1);
+    for (let i = 0; i < emails.length; i += MAILERSEND_BULK_CHUNK_SIZE) {
+        const chunk = emails.slice(i, i + MAILERSEND_BULK_CHUNK_SIZE);
 
-    await mailersend.email.sendBulk(emails);
+        await bulkLimiter.removeTokens(1);
+
+        await sendWithRateLimitRetry(() => mailersend.email.sendBulk(chunk));
+    }
 }
 
 export const sendBulkEmails = async ({ recipients, subject, dynamicData, templateId }: SendBulkEmailParams) => {
@@ -117,24 +108,35 @@ export const sendBulkEmails = async ({ recipients, subject, dynamicData, templat
 
     for (const recipient of recipients) {
 
+        const mergedData = {
+            ...dynamicData,
+            ...recipient.dynamicData,
+            email: recipient.email,
+            userId: recipient.userId,
+            siteUrl: config.SITE_URL,
+        };
+
         const personalizations = [{
             email: recipient.email,
-            data: {
-                ...dynamicData,
-                email: recipient.email,
-                userId: recipient.userId,
-                siteUrl: config.SITE_URL,
-            }
+            data: mergedData,
         }]
 
         // We have to do this because MailerSend is escaping the placeholders containing html tags
-        const html = replacePlaceholdersWithAllowedKeys(emailTemplateBody, dynamicData, ['developers', 'deployers', 'entitiesHarmed', 'implicatedSystems'])
+        const html = replacePlaceholdersWithAllowedKeys(emailTemplateBody, mergedData, ['developers', 'deployers', 'entitiesHarmed', 'implicatedSystems'])
 
         const emailParams = new EmailParams()
             .setFrom({ email: config.NOTIFICATIONS_SENDER, name: config.NOTIFICATIONS_SENDER_NAME })
             .setTo([new Recipient(recipient.email)])
             .setPersonalization(personalizations)
-            .setSubject(subject)
+            .setSubject(recipient.subject ?? subject)
+            // NOTE: do not add .setListUnsubscribe() here without first confirming the
+            // MailerSend plan. The list_unsubscribe field is gated to Professional/Enterprise
+            // plans; on lower tiers MailerSend rejects every message in the bulk batch during
+            // async validation (a 202 is still returned at POST time), so nothing is delivered
+            // while the run looks successful. This regressed delivery in #3943/#3950 and was
+            // removed to restore the working behavior. If reintroduced, it must be a *bare* URL
+            // (e.g. `${config.SITE_URL}/account/`, no angle brackets) on a Professional+ plan.
+            // The email footer already provides a manage/unsubscribe link.
             .setHtml(html);
         //TODO: add a text version of the email
         // .setText("Greetings from the team, you got this message through MailerSend.");
@@ -163,7 +165,9 @@ export const mailersendSingleSend = async (email: EmailParams) => {
     assert(email.to.length == 1, 'Email must have exactly one recipient');
     assert(!email.cc, 'Should not use the "cc" field');
 
-    await mailersend.email.send(email);
+    await bulkLimiter.removeTokens(1);
+
+    await sendWithRateLimitRetry(() => mailersend.email.send(email));
 }
 
 export interface SendEmailParams {
