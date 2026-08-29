@@ -102,7 +102,7 @@ const backoffDelay = (attempt: number): number => {
  * in milliseconds, or null when the header is absent or unparseable. A date already in the
  * past clamps to zero.
  */
-export const parseRetryAfter = (value: string | null): number | null => {
+const parseRetryAfter = (value: string | null): number | null => {
   // An explicit check because "0" is falsy in JavaScript and legally means retry now.
   if (value === null || value.trim() === '') return null;
 

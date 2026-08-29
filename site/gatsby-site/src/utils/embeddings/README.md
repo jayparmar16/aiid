@@ -36,13 +36,12 @@ it had already finished.
 
 ## Key Files
 
-| File | Purpose |
+| File | What it contains |
 |---|---|
-| `src/scripts/embed-incidents.ts` | The runner. Reads the database, drives concurrency, writes results, handles interruption. |
-| `src/utils/embeddings/provider.ts` | The only file that knows about the vendor. Builds the request, retries, and backs off. |
-| `src/utils/embeddings/incidentText.ts` | Pure text and vector helpers. No network, no database. |
-| `.github/workflows/embed-incidents.yml` | The manually triggered GitHub Action. |
-| `server/tests/embeddings.spec.ts` | Unit tests for the pure helpers. |
+| `src/scripts/embed-incidents.ts` | Entry point and orchestration. Selects the incidents to process, fetches their reports, requests a vector for each, writes the results, and prints the progress and summary output. Also handles early stops from a signal or from repeated failures. |
+| `src/utils/embeddings/provider.ts` | HTTP client for the embedding endpoint. Builds and sends the request, validates the response shape, and retries with growing delays on transient errors. Holds every vendor-specific detail, which is what reduces a model change to a settings change. |
+| `src/utils/embeddings/incidentText.ts` | Text and vector helpers, with no network or database access. `buildIncidentText` joins a title and its report bodies into one string, `chunkText` splits text longer than the model accepts, and `poolVectors` averages chunk vectors into a single vector. |
+| `.github/workflows/embed-incidents.yml` | GitHub Action definition. Declares the dispatch inputs, installs Node and the project dependencies, runs the script with the configured secrets, and uploads the failure manifest. |
 
 ## Running It Locally
 
@@ -305,12 +304,3 @@ Check `EMBEDDING_MAX_INPUT_CHARS` against the new model's token limit, and expec
 next run to re-embed the whole corpus, since `--resume` keys on the model name. Vectors
 of different dimensions are stored side by side without complaint, so compare only
 vectors that share a `model` value.
-
-## Tests
-
-The pure helpers are covered by `server/tests/embeddings.spec.ts`, which needs no network
-and no database:
-
-```bash
-npm run test:api -- embeddings
-```
