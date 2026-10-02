@@ -6,6 +6,15 @@ import { faXmark } from '@fortawesome/free-solid-svg-icons';
 // Spells out "1 entity" or "6 entities", since these strings have no plural translations.
 const counted = (t, count, one, many) => (count === 1 ? t(one) : t(many, { count }));
 
+// Marks entities covered through an editor's link rather than the written name, which would
+// otherwise look out of place in the list (Facebook under "Excluding: Meta").
+const entityList = (t, entities) =>
+  entities
+    .map((entity) =>
+      entity.matchedBy === 'LINK' ? t('{{name}} (linked)', { name: entity.name }) : entity.name
+    )
+    .join(', ');
+
 /** One exclusion, labelled with the entity whose name was written, listing every entity it covers. */
 function ExclusionChip({ constraint, onRemove }) {
   const { t } = useTranslation();
@@ -16,7 +25,7 @@ function ExclusionChip({ constraint, onRemove }) {
 
   return (
     <span
-      title={constraint.entities.map((entity) => entity.name).join(', ')}
+      title={entityList(t, constraint.entities)}
       className="inline-flex items-center gap-2 rounded-full border border-red-300 bg-red-50 px-3 py-1 text-sm text-red-800"
       data-cy="semantic-search-exclusion"
     >

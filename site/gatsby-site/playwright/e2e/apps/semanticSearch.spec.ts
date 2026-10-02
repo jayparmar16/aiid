@@ -1,4 +1,6 @@
 import { expect } from '@playwright/test';
+import { XMLParser } from 'fast-xml-parser';
+import { strFromU8, unzipSync } from 'fflate';
 import { readFile } from 'node:fs/promises';
 import { test } from '../../utils';
 
@@ -24,6 +26,54 @@ const results = Array.from({ length: 30 }, (_, index) => ({
     description: index === 0 ? 'Description, "quoted"\nline' : `Description ${index + 1}`,
   },
 }));
+
+const xmlParser = new XMLParser({
+  ignoreAttributes: false,
+  parseTagValue: false,
+  trimValues: false,
+  isArray: (tag) => ['sheet', 'Relationship', 'si', 'row', 'c'].includes(tag),
+});
+
+// Reads every sheet of an .xlsx file, in workbook order, as rows of cell text. The file is a zip of
+// XML files, and its text cells hold indexes into one list of strings shared by all sheets.
+const readWorkbook = (xlsx: Uint8Array) => {
+  const files = unzipSync(xlsx);
+
+  const read = (path: string) => xmlParser.parse(strFromU8(files[path]));
+
+  const targets = new Map(
+    read('xl/_rels/workbook.xml.rels').Relationships.Relationship.map((relationship: any) => [
+      relationship['@_Id'],
+      relationship['@_Target'],
+    ])
+  );
+
+  // Text with leading or trailing spaces carries an attribute, which makes it parse as an object.
+  const strings = read('xl/sharedStrings.xml').sst.si.map(({ t }: any) =>
+    typeof t === 'object' ? t['#text'] : t
+  );
+
+  const sheets: Record<string, string[][]> = {};
+
+  for (const sheet of read('xl/workbook.xml').workbook.sheets.sheet) {
+    const { worksheet } = read(`xl/${targets.get(sheet['@_r:id'])}`);
+
+    sheets[sheet['@_name']] = worksheet.sheetData.row.map((row: any) => {
+      const cells: string[] = [];
+
+      for (const cell of row.c ?? []) {
+        // Cells are addressed like "B7", and these sheets never go past column Z.
+        const column = cell['@_r'].charCodeAt(0) - 'A'.charCodeAt(0);
+
+        cells[column] = cell['@_t'] === 's' ? strings[Number(cell.v)] : cell.v;
+      }
+
+      return Array.from(cells, (value) => value ?? '');
+    });
+  }
+
+  return sheets;
+};
 
 test.describe('Semantic Search', () => {
   test('asks a logged-out visitor to log in instead of showing the search', async ({ page }) => {
@@ -188,6 +238,7 @@ test.describe('Semantic Search', () => {
       constraints: [
         {
           kind: 'EXCLUDE_ENTITY',
+          source: 'QUERY_TEXT',
           matchedText: 'tesla',
           incidentCount: 50,
           entities: [
@@ -255,6 +306,138 @@ test.describe('Semantic Search', () => {
     await expect(interpretation).toHaveCount(0);
   });
 
+  test('describes the search in a second sheet of the Excel export', async ({ page, login }) => {
+    await login({ customData: { roles: ['subscriber'] } });
+
+    const query = 'self-driving car incidents excluding tesla';
+
+    const interpretation = {
+      semanticText: 'self-driving car incidents',
+      constraints: [
+        {
+          kind: 'EXCLUDE_ENTITY',
+          source: 'QUERY_TEXT',
+          matchedText: 'tesla',
+          incidentCount: 50,
+          entities: [
+            { entity_id: 'tesla', name: 'Tesla', matchedBy: 'NAME' },
+            { entity_id: 'tesla-autopilot', name: 'Tesla Autopilot', matchedBy: 'FAMILY' },
+          ],
+        },
+        // The page has no label for this kind or source, so the export writes them as named.
+        {
+          kind: 'NEW_KIND',
+          source: 'NEW_SOURCE',
+          matchedText: null,
+          incidentCount: 0,
+          entities: [],
+        },
+      ],
+      warnings: [{ code: 'UNRECOGNISED_EXCLUSION', text: 'robocall operators' }],
+    };
+
+    await page.route('**/graphql', async (route) => {
+      const request = route.request().postDataJSON();
+
+      if (request.operationName !== 'SemanticSearch') {
+        await route.continue();
+        return;
+      }
+
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(response('OK', results.slice(0, 2), interpretation)),
+      });
+    });
+
+    await page.goto(url);
+
+    await page.locator('[data-cy="semantic-search-input"]').fill(query);
+    await page.locator('[data-cy="semantic-search-submit"]').click();
+    await expect(page.locator('[data-cy="row"]')).toHaveCount(2);
+
+    const downloadPromise = page.waitForEvent('download');
+    await page.locator('[data-cy="semantic-search-export"]').click();
+    const download = await downloadPromise;
+    const workbook = readWorkbook(await readFile((await download.path())!));
+
+    expect(download.suggestedFilename()).toMatch(
+      /^semantic-search-self-driving-car-incidents-excluding-tesla-\d{4}-\d{2}-\d{2}\.xlsx$/
+    );
+    expect(Object.keys(workbook)).toEqual(['Results', 'Search']);
+    expect(workbook.Results.map((row) => row[3])).toEqual(['Title', 'Incident 1', 'Incident 2']);
+
+    const [queryRow, semanticTextRow, searchedAtRow, ...rest] = workbook.Search;
+
+    expect(queryRow).toEqual(['Query', query]);
+    expect(semanticTextRow).toEqual(['Semantic text', 'self-driving car incidents']);
+    expect(searchedAtRow[0]).toBe('Searched at');
+    expect(searchedAtRow[1]).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$/);
+
+    const searchedAt = Date.parse(searchedAtRow[1].replace(' ', 'T').replace(' UTC', 'Z'));
+
+    expect(Math.abs(Date.now() - searchedAt)).toBeLessThan(5 * 60 * 1000);
+    expect(rest).toEqual([
+      [],
+      ['Constraint', 'Matched text', 'Source', 'Entities', 'Incidents'],
+      ['Excluding', 'tesla', 'Query text', 'Tesla, Tesla Autopilot', '50'],
+      ['NEW_KIND', '', 'NEW_SOURCE', '', '0'],
+      [],
+      ['Warning', 'Text'],
+      ['UNRECOGNISED_EXCLUSION', 'robocall operators'],
+    ]);
+  });
+
+  test('marks the entities an exclusion covers through a link', async ({ page, login }) => {
+    await login({ customData: { roles: ['subscriber'] } });
+
+    const excludingMeta = {
+      semanticText: 'social media harms',
+      constraints: [
+        {
+          kind: 'EXCLUDE_ENTITY',
+          source: 'QUERY_TEXT',
+          matchedText: 'meta',
+          incidentCount: 97,
+          entities: [
+            { entity_id: 'meta', name: 'Meta', matchedBy: 'NAME' },
+            { entity_id: 'meta-ai', name: 'Meta AI', matchedBy: 'FAMILY' },
+            { entity_id: 'facebook', name: 'Facebook', matchedBy: 'LINK' },
+          ],
+        },
+      ],
+      warnings: [],
+    };
+
+    await page.route('**/graphql', async (route) => {
+      const request = route.request().postDataJSON();
+
+      if (request.operationName !== 'SemanticSearch') {
+        await route.continue();
+        return;
+      }
+
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(response('OK', results.slice(0, 2), excludingMeta)),
+      });
+    });
+
+    await page.goto(url);
+
+    const input = page.locator('[data-cy="semantic-search-input"]');
+    const exclusion = page.locator('[data-cy="semantic-search-exclusion"]');
+
+    await input.fill('social media harms excluding meta');
+    await page.locator('[data-cy="semantic-search-submit"]').click();
+
+    await expect(exclusion).toContainText('Excluding: Meta');
+    await expect(exclusion).toContainText('3 entities · 97 incidents');
+    await expect(exclusion).toHaveAttribute('title', 'Meta, Meta AI, Facebook (linked)');
+  });
+
   test('holds constraints as removable chips and sends them back as explicit filters', async ({
     page,
     login,
@@ -263,6 +446,7 @@ test.describe('Semantic Search', () => {
 
     const tesla = {
       kind: 'EXCLUDE_ENTITY',
+      source: 'QUERY_TEXT',
       matchedText: 'tesla',
       incidentCount: 50,
       entities: [
@@ -273,6 +457,7 @@ test.describe('Semantic Search', () => {
 
     const waymo = {
       kind: 'EXCLUDE_ENTITY',
+      source: 'QUERY_TEXT',
       matchedText: 'waymo',
       incidentCount: 12,
       entities: [{ entity_id: 'waymo', name: 'Waymo', matchedBy: 'NAME' }],

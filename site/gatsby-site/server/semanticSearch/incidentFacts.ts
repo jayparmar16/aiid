@@ -1,7 +1,7 @@
 /**
  * The facts semantic search filters on, loaded from MongoDB in one pass and held in memory: entity
- * names, and which incidents each entity occurs in, by role. It is the parser's vocabulary and the
- * source of every constraint's incident set.
+ * names, the links editors made between entities, and which incidents each entity occurs in, by
+ * role. It is the parser's vocabulary and the source of every constraint's incident set.
  */
 
 import { MongoClient } from 'mongodb';
@@ -36,11 +36,13 @@ const addTo = <K, V>(map: Map<K, Set<V>>, key: K, value: V) => {
   else map.set(key, new Set([value]));
 };
 
+const MATCH_ORDER: ResolvedEntity['matchedBy'][] = ['NAME', 'FAMILY', 'LINK'];
+
 export const loadIncidentFacts = async (client: MongoClient): Promise<IncidentFacts> => {
   const db = client.db('aiidprod');
   const roleProjection = Object.fromEntries(Object.values(ROLE_FIELDS).map((field) => [field, 1]));
 
-  const [entities, incidents] = await Promise.all([
+  const [entities, incidents, links] = await Promise.all([
     db
       .collection('entities')
       .find({}, { projection: { _id: 0, entity_id: 1, name: 1 } })
@@ -48,6 +50,10 @@ export const loadIncidentFacts = async (client: MongoClient): Promise<IncidentFa
     db
       .collection('incidents')
       .find({}, { projection: { _id: 0, incident_id: 1, ...roleProjection } })
+      .toArray(),
+    db
+      .collection('entity_relationships')
+      .find({}, { projection: { _id: 0, sub: 1, obj: 1, is_symmetric: 1 } })
       .toArray(),
   ]);
 
@@ -97,6 +103,17 @@ export const loadIncidentFacts = async (client: MongoClient): Promise<IncidentFa
     }
   }
 
+  // The entity editor saves each link once, from the entity being edited, and marks it symmetric,
+  // so a link is followed both ways. One explicitly marked as not symmetric runs from sub to obj.
+  const linkedIds = new Map<string, Set<string>>();
+
+  for (const { sub, obj, is_symmetric: isSymmetric } of links) {
+    if (typeof sub !== 'string' || typeof obj !== 'string' || sub === obj) continue;
+
+    addTo(linkedIds, sub, obj);
+    if (isSymmetric !== false) addTo(linkedIds, obj, sub);
+  }
+
   const resolve: Vocabulary['resolve'] = (words, roles, { allowNameStart = false } = {}) => {
     const named = idsByName.get(words.join(' ')) ?? new Set<string>();
     const candidates = Array.from(idsByWord.get(words[0]) ?? []).filter((id) =>
@@ -110,7 +127,7 @@ export const loadIncidentFacts = async (client: MongoClient): Promise<IncidentFa
 
     // The family is every entity whose name contains the written words, which takes in the named
     // entity itself and products named after it ("Tesla Autopilot" for "tesla").
-    return candidates
+    const family = candidates
       .filter((id) => containsSequence(wordsById.get(id)!, words))
       .map(
         (id): ResolvedEntity => ({
@@ -118,12 +135,29 @@ export const loadIncidentFacts = async (client: MongoClient): Promise<IncidentFa
           name: names.get(id)!,
           matchedBy: named.has(id) ? 'NAME' : 'FAMILY',
         })
-      )
-      .sort(
-        (left, right) =>
-          Number(right.matchedBy === 'NAME') - Number(left.matchedBy === 'NAME') ||
-          left.name.localeCompare(right.name)
       );
+
+    // Links let editors join entities whose names share nothing, such as Meta and Facebook. They
+    // are followed one step from the named entity only: the rest of the family is already a step
+    // away, and its links drift further ("Unknown scammers operating Meta ad accounts" is linked to
+    // Scammers, which would make excluding Meta remove every scam).
+    const covered = new Set(family.map((entity) => entity.entityId));
+    const linked: ResolvedEntity[] = [];
+
+    for (const { entityId } of family.filter((member) => member.matchedBy === 'NAME')) {
+      for (const id of linkedIds.get(entityId) ?? []) {
+        if (covered.has(id) || !names.has(id) || !occursIn(id, roles)) continue;
+
+        covered.add(id);
+        linked.push({ entityId: id, name: names.get(id)!, matchedBy: 'LINK' });
+      }
+    }
+
+    return [...family, ...linked].sort(
+      (left, right) =>
+        MATCH_ORDER.indexOf(left.matchedBy) - MATCH_ORDER.indexOf(right.matchedBy) ||
+        left.name.localeCompare(right.name)
+    );
   };
 
   const incidentsWith = (entityIds: readonly string[], roles: readonly EntityRole[]) => {

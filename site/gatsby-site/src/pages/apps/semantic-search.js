@@ -170,7 +170,11 @@ export default function SemanticSearchPage() {
               <span data-cy="semantic-search-count">
                 {t('{{count}} matching incidents', { count: results.length })}
               </span>
-              <ExcelExport results={results} query={submitted} />
+              <ExcelExport
+                results={results}
+                query={submitted}
+                interpretation={response.interpretation}
+              />
             </div>
             <SemanticSearchTable results={results} />
           </>

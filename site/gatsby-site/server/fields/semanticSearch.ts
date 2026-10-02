@@ -78,6 +78,10 @@ const SemanticSearchEntityType = new GraphQLObjectType({
               description:
                 "The entity's name contains what was written, as with a product named after its company.",
             },
+            LINK: {
+              description:
+                'Editors linked the entity to the one whose whole name was written. Only direct links are followed.',
+            },
           },
         })
       ),
