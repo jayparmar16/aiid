@@ -319,3 +319,366 @@ describe('semanticSearch GraphQL field', () => {
     expect(response.body.data.semanticSearch.results[0].incident.incident_id).toBe(4);
   });
 });
+
+describe('semanticSearch exclusions', () => {
+  let server: ApolloServer;
+  let url: string;
+  const originalEnv = process.env;
+  const originalFetch = global.fetch;
+
+  /** Every text the embedding endpoint received, in order. */
+  let embedded: string[];
+
+  const stubEmbedding = (response: () => Promise<Response>) => {
+    global.fetch = jest.fn(async (_url: unknown, init?: RequestInit) => {
+      embedded.push(...JSON.parse(String(init?.body)).input);
+      return response();
+    }) as unknown as typeof fetch;
+  };
+
+  const embedAs = (values: number[]) =>
+    stubEmbedding(
+      async () =>
+        new Response(JSON.stringify({ data: [{ index: 0, embedding: values }] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+    );
+
+  const incident = (
+    incident_id: number,
+    title: string,
+    roles: { deployer?: string[]; developer?: string[]; implicated?: string[]; harmed?: string[] },
+    reports: number[] = []
+  ) => ({
+    incident_id,
+    title,
+    description: title,
+    date: '2024-01-01',
+    reports,
+    'Alleged deployer of AI system': roles.deployer ?? [],
+    'Alleged developer of AI system': roles.developer ?? [],
+    implicated_systems: roles.implicated ?? [],
+    'Alleged harmed or nearly harmed parties': roles.harmed ?? [],
+  });
+
+  const vectors = (incident_id: number, values: number[]) => ({
+    incident_id,
+    embedding_schema_version: 2,
+    embedding_profile: 'nemotron-retrieval-v1',
+    model: 'nvidia/nemotron-3-embed-1b:free',
+    dims: 2,
+    overview: { vector: vector(values) },
+    passages: [],
+  });
+
+  const search = (query: string, limit?: number) =>
+    makeRequest(url, {
+      query: `
+        query SemanticSearch($query: String!, $limit: Int) {
+          semanticSearch(query: $query, limit: $limit) {
+            status
+            results { incident { incident_id } }
+            interpretation {
+              semanticText
+              constraints {
+                kind
+                source
+                matchedText
+                incidentCount
+                entities { entity_id name matchedBy }
+              }
+              warnings { code text }
+            }
+          }
+        }
+      `,
+      variables: { query, limit },
+    });
+
+  const resultIds = (response: any) =>
+    response.body.data.semanticSearch.results.map((result: any) => result.incident.incident_id);
+
+  const interpretationOf = (response: any) => response.body.data.semanticSearch.interpretation;
+
+  const excludedIds = (response: any) =>
+    interpretationOf(response).constraints.map((constraint: any) =>
+      constraint.entities.map((entity: any) => entity.entity_id)
+    );
+
+  beforeAll(async () => {
+    ({ server, url } = await startTestServer());
+  });
+
+  afterAll(async () => {
+    process.env = originalEnv;
+    global.fetch = originalFetch;
+    await server.stop();
+  });
+
+  beforeEach(async () => {
+    jest.clearAllMocks();
+    embedded = [];
+    process.env = {
+      ...originalEnv,
+      EMBEDDING_API_KEY: 'test-key',
+      EMBEDDING_API_BASE_URL: 'https://embedding.test/v1',
+      EMBEDDING_MODEL: 'nvidia/nemotron-3-embed-1b:free',
+    };
+    delete process.env.NVIDIA_URL;
+    delete process.env.NVIDIA_API_KEY;
+    resetSemanticSearchCache();
+
+    await seedCollection({
+      name: 'users',
+      database: 'customData',
+      docs: [{ userId: 'subscriber1', roles: ['subscriber'] }],
+    });
+    mockSession('subscriber1');
+
+    await seedCollection({
+      name: 'entities',
+      docs: [
+        { entity_id: 'tesla', name: 'Tesla' },
+        { entity_id: 'tesla-autopilot', name: 'Tesla Autopilot' },
+        { entity_id: 'tesla-full-self-driving-(fsd)', name: 'Tesla Full Self-Driving (FSD)' },
+        { entity_id: 'tesla-drivers', name: 'Tesla drivers' },
+        { entity_id: 'uber', name: 'Uber' },
+        { entity_id: 'waymo', name: 'Waymo' },
+        { entity_id: 'clearview-ai', name: 'Clearview AI' },
+        { entity_id: 'students', name: 'Students' },
+      ],
+    });
+
+    // Scores against the query vector [1, 0]: 10 > 11 > 12 > 13 > 15, and 14 is below the threshold.
+    await seedCollection({
+      name: 'incidents',
+      docs: [
+        incident(10, 'Tesla on Autopilot crashes', {
+          deployer: ['tesla'],
+          developer: ['tesla'],
+          implicated: ['tesla-autopilot'],
+        }),
+        incident(11, 'Full Self-Driving runs a red light', {
+          implicated: ['tesla-full-self-driving-(fsd)'],
+        }),
+        // Its coverage compares Uber with Tesla, but Tesla has no role in the incident.
+        incident(12, 'Uber test car kills a pedestrian', { deployer: ['uber'] }, [101]),
+        // Tesla drivers were harmed here, which never makes Tesla responsible.
+        incident(13, 'Waymo hits a Tesla', { deployer: ['waymo'], harmed: ['tesla-drivers'] }),
+        incident(14, 'Unrelated incident', { deployer: ['clearview-ai'] }),
+        incident(15, 'Students misuse a chatbot', { deployer: ['students'] }),
+      ],
+    });
+
+    await seedCollection({
+      name: 'reports',
+      docs: [{ report_number: 101, plain_text: 'Unlike Tesla, Uber ran its own test fleet.' }],
+    });
+
+    await seedCollection({
+      name: 'incident_embeddings',
+      docs: [
+        vectors(10, [1, 0]),
+        vectors(11, [0.99, 0.14]),
+        vectors(12, [0.95, 0.31]),
+        vectors(13, [0.9, 0.44]),
+        vectors(14, [0, 1]),
+        vectors(15, [0.8, 0.6]),
+      ],
+    });
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it('removes incidents a Tesla-family entity is responsible for and embeds only the rest', async () => {
+    embedAs([1, 0]);
+
+    const response = await search('self-driving car incidents excluding tesla');
+
+    expect(response.body.errors).toBeUndefined();
+    expect(embedded).toEqual(['self-driving car incidents']);
+    expect(resultIds(response)).toEqual([12, 13, 15]);
+    expect(interpretationOf(response)).toEqual({
+      semanticText: 'self-driving car incidents',
+      warnings: [],
+      constraints: [
+        {
+          kind: 'EXCLUDE_ENTITY',
+          source: 'QUERY_TEXT',
+          matchedText: 'tesla',
+          incidentCount: 2,
+          entities: [
+            { entity_id: 'tesla', name: 'Tesla', matchedBy: 'NAME' },
+            { entity_id: 'tesla-autopilot', name: 'Tesla Autopilot', matchedBy: 'FAMILY' },
+            {
+              entity_id: 'tesla-full-self-driving-(fsd)',
+              name: 'Tesla Full Self-Driving (FSD)',
+              matchedBy: 'FAMILY',
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it.each([
+    'self-driving crashes excluding tesla',
+    'self-driving crashes, exclude tesla',
+    'self-driving crashes except tesla',
+    'self-driving crashes except for tesla',
+    'self-driving crashes but not tesla',
+    'self-driving crashes, not tesla',
+    'self-driving crashes without tesla',
+    'self-driving crashes other than tesla',
+    'self-driving crashes apart from tesla',
+    'self-driving crashes aside from tesla',
+    'self-driving crashes not involving tesla',
+    'non-tesla self-driving crashes',
+    'self-driving crashes -tesla',
+  ])('reads an exclusion from %p', async (query) => {
+    embedAs([1, 0]);
+
+    const response = await search(query);
+
+    expect(embedded).toEqual(['self-driving crashes']);
+    expect(excludedIds(response)).toEqual([
+      ['tesla', 'tesla-autopilot', 'tesla-full-self-driving-(fsd)'],
+    ]);
+    expect(resultIds(response)).toEqual([12, 13, 15]);
+  });
+
+  it('excludes each name in a list and stops at the first unknown one', async () => {
+    embedAs([1, 0]);
+
+    const listed = await search('self-driving crashes excluding tesla, waymo and uber');
+
+    expect(excludedIds(listed)).toEqual([
+      ['tesla', 'tesla-autopilot', 'tesla-full-self-driving-(fsd)'],
+      ['waymo'],
+      ['uber'],
+    ]);
+    expect(resultIds(listed)).toEqual([15]);
+
+    const stopped = await search('self-driving crashes excluding tesla and pedestrians');
+
+    expect(excludedIds(stopped)).toEqual([
+      ['tesla', 'tesla-autopilot', 'tesla-full-self-driving-(fsd)'],
+    ]);
+    expect(interpretationOf(stopped).semanticText).toBe('self-driving crashes and pedestrians');
+    expect(interpretationOf(stopped).warnings).toEqual([]);
+  });
+
+  it('prefers the longest name, ignores case and punctuation, and folds plurals', async () => {
+    embedAs([1, 0]);
+
+    const longest = await search('crashes excluding tesla autopilot');
+
+    expect(excludedIds(longest)).toEqual([['tesla-autopilot']]);
+    expect(resultIds(longest)).toEqual([11, 12, 13, 15]);
+
+    const folded = await search('Self-driving crashes EXCLUDING Teslas!');
+
+    expect(interpretationOf(folded).semanticText).toBe('Self-driving crashes!');
+    expect(interpretationOf(folded).constraints[0].matchedText).toBe('Teslas');
+    expect(excludedIds(folded)[0][0]).toBe('tesla');
+  });
+
+  it('accepts the start of a name after a strong phrase but not after a weak one', async () => {
+    embedAs([1, 0]);
+
+    const strong = await search('face recognition not involving clearview');
+
+    expect(excludedIds(strong)).toEqual([['clearview-ai']]);
+
+    const weak = await search('face recognition without clearview');
+
+    expect(interpretationOf(weak).constraints).toEqual([]);
+    expect(embedded).toEqual(['face recognition', 'face recognition without clearview']);
+  });
+
+  it('reports an unrecognised exclusion and never embeds its words', async () => {
+    embedAs([1, 0]);
+
+    const response = await search('deepfake scams excluding robocall operators');
+
+    expect(embedded).toEqual(['deepfake scams']);
+    expect(interpretationOf(response)).toEqual({
+      semanticText: 'deepfake scams',
+      constraints: [],
+      warnings: [{ code: 'UNRECOGNISED_EXCLUSION', text: 'robocall operators' }],
+    });
+  });
+
+  it.each([
+    'chatbots that do not work',
+    'non-consensual deepfakes',
+    'cars without safety drivers',
+    'tesla autopilot crashes',
+    'students misusing chatbots',
+  ])('leaves %p exactly as written', async (query) => {
+    embedAs([1, 0]);
+
+    const response = await search(query);
+
+    expect(embedded).toEqual([query]);
+    expect(interpretationOf(response)).toEqual({
+      semanticText: query,
+      constraints: [],
+      warnings: [],
+    });
+  });
+
+  it('fills the limit from incidents left after exclusion', async () => {
+    embedAs([1, 0]);
+
+    const response = await search('crashes excluding tesla', 1);
+
+    expect(resultIds(response)).toEqual([12]);
+  });
+
+  it('returns the interpretation when embedding is limited or unavailable', async () => {
+    stubEmbedding(async () => new Response('rate limited', { status: 429 }));
+
+    const limited = await search('crashes excluding tesla');
+
+    expect(limited.body.data.semanticSearch.status).toBe('QUOTA_EXHAUSTED');
+    expect(excludedIds(limited)).toEqual([
+      ['tesla', 'tesla-autopilot', 'tesla-full-self-driving-(fsd)'],
+    ]);
+
+    stubEmbedding(async () => {
+      throw new Error('provider unavailable');
+    });
+
+    const unavailable = await search('crashes excluding tesla');
+
+    expect(unavailable.body.data.semanticSearch.status).toBe('UNAVAILABLE');
+    expect(interpretationOf(unavailable).semanticText).toBe('crashes');
+  });
+
+  it('keeps entity facts until the cache is reset, then sees new entities', async () => {
+    embedAs([1, 0]);
+
+    expect(interpretationOf(await search('crashes excluding nova')).warnings).toHaveLength(1);
+
+    await seedCollection({
+      name: 'entities',
+      docs: [{ entity_id: 'nova', name: 'Nova' }],
+      drop: false,
+    });
+    await seedCollection({
+      name: 'incidents',
+      docs: [incident(16, 'Nova robotaxi stalls', { deployer: ['nova'] })],
+      drop: false,
+    });
+
+    expect(interpretationOf(await search('crashes excluding nova')).warnings).toHaveLength(1);
+
+    resetSemanticSearchCache();
+
+    expect(excludedIds(await search('crashes excluding nova'))).toEqual([['nova']]);
+  });
+});

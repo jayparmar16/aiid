@@ -6,6 +6,7 @@ import HeadContent from '../../components/HeadContent';
 import { ApiAccessGate } from '../../components/ui/ApiLoginRequired';
 import SemanticSearchTable from '../../components/semanticSearch/SemanticSearchTable';
 import ExcelExport from '../../components/semanticSearch/ExcelExport';
+import SearchInterpretation from '../../components/semanticSearch/SearchInterpretation';
 import { SEMANTIC_SEARCH } from '../../graphql/semanticSearch';
 
 const exampleQueries = [
@@ -97,6 +98,9 @@ export default function SemanticSearchPage() {
         </form>
 
         {loading && <Spinner />}
+
+        {/* Shown with every status, so a refused search still says how the query was read. */}
+        {!loading && <SearchInterpretation interpretation={response?.interpretation} />}
 
         {!loading && (error || response?.status === 'UNAVAILABLE') && (
           <p className="text-red-700" data-cy="semantic-search-unavailable">

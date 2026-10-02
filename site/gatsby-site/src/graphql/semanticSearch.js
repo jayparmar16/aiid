@@ -13,6 +13,23 @@ export const SEMANTIC_SEARCH = gql(`
           description
         }
       }
+      interpretation {
+        semanticText
+        constraints {
+          kind
+          matchedText
+          incidentCount
+          entities {
+            entity_id
+            name
+            matchedBy
+          }
+        }
+        warnings {
+          code
+          text
+        }
+      }
     }
   }
 `);

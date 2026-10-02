@@ -16,6 +16,8 @@ import {
   EmbeddingRequestError,
 } from '../../src/utils/embeddings/provider';
 import { Context, DBIncident } from '../interfaces';
+import { IncidentFacts, loadIncidentFacts } from '../semanticSearch/incidentFacts';
+import { parseQuery } from '../semanticSearch/parseQuery';
 import { IncidentType } from '../types/incidents';
 
 const EMBEDDING_SCHEMA_VERSION = 2;
@@ -51,12 +53,118 @@ const SemanticSearchResultType = new GraphQLObjectType({
   },
 });
 
+const SemanticSearchEntityType = new GraphQLObjectType({
+  name: 'SemanticSearchEntity',
+  description: 'An entity that a constraint covers.',
+  fields: {
+    entity_id: { type: new GraphQLNonNull(GraphQLString) },
+    name: { type: new GraphQLNonNull(GraphQLString) },
+    matchedBy: {
+      type: new GraphQLNonNull(
+        new GraphQLEnumType({
+          name: 'SemanticSearchEntityMatch',
+          values: {
+            NAME: { description: "The entity's whole name was written." },
+            FAMILY: {
+              description:
+                "The entity's name contains what was written, as with a product named after its company.",
+            },
+          },
+        })
+      ),
+    },
+  },
+});
+
+const SemanticSearchConstraintType = new GraphQLObjectType({
+  name: 'SemanticSearchConstraint',
+  description: 'A rule applied to the results before they are ranked by meaning.',
+  fields: {
+    kind: {
+      type: new GraphQLNonNull(
+        new GraphQLEnumType({
+          name: 'SemanticSearchConstraintKind',
+          values: {
+            EXCLUDE_ENTITY: {
+              description:
+                'Removes incidents in which a covered entity is the alleged deployer, developer or implicated system.',
+            },
+          },
+        })
+      ),
+    },
+    source: {
+      type: new GraphQLNonNull(
+        new GraphQLEnumType({
+          name: 'SemanticSearchConstraintSource',
+          values: { QUERY_TEXT: { description: 'Read from the query text.' } },
+        })
+      ),
+    },
+    matchedText: {
+      type: GraphQLString,
+      description: 'The words in the query that named what the constraint covers.',
+    },
+    entities: {
+      type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(SemanticSearchEntityType))),
+    },
+    incidentCount: {
+      type: new GraphQLNonNull(GraphQLInt),
+      description: 'How many incidents in the whole database the constraint applies to.',
+    },
+  },
+});
+
+const SemanticSearchWarningType = new GraphQLObjectType({
+  name: 'SemanticSearchWarning',
+  fields: {
+    code: {
+      type: new GraphQLNonNull(
+        new GraphQLEnumType({
+          name: 'SemanticSearchWarningCode',
+          values: {
+            UNRECOGNISED_EXCLUSION: {
+              description:
+                'The words after an exclusion are not a known organisation or system, so nothing was excluded. The words were not searched for either.',
+            },
+          },
+        })
+      ),
+    },
+    text: {
+      type: new GraphQLNonNull(GraphQLString),
+      description: 'The words concerned, as written.',
+    },
+  },
+});
+
+const SemanticSearchInterpretationType = new GraphQLObjectType({
+  name: 'SemanticSearchInterpretation',
+  description: 'How the query was read.',
+  fields: {
+    semanticText: {
+      type: new GraphQLNonNull(GraphQLString),
+      description: 'The part of the query ranked by meaning, with constraint phrases removed.',
+    },
+    constraints: {
+      type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(SemanticSearchConstraintType))),
+    },
+    warnings: {
+      type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(SemanticSearchWarningType))),
+    },
+  },
+});
+
 const SemanticSearchResponseType = new GraphQLObjectType({
   name: 'SemanticSearchResponse',
   fields: {
     status: { type: new GraphQLNonNull(SemanticSearchStatusType) },
     results: {
       type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(SemanticSearchResultType))),
+    },
+    interpretation: {
+      type: new GraphQLNonNull(SemanticSearchInterpretationType),
+      description: 'Returned with every status, so a caller can show how the query was read.',
     },
   },
 });
@@ -97,6 +205,10 @@ const createWarmCache = <T>(keep: (value: T) => boolean = () => true) => {
 
 // An empty load is not kept, so vectors written after it are found by the next search.
 const cachedVectors = createWarmCache<CachedIncidentVectors[]>((incidents) => incidents.length > 0);
+
+// Not keyed by the embedding model: the query is parsed before anything is embedded.
+const cachedFacts = createWarmCache<IncidentFacts>();
+const FACTS_CACHE_KEY = 'incident-facts';
 
 /** Converts BSON Float32 vector data to a unit vector, rejecting malformed values. */
 export const normaliseBinaryVector = (value: unknown, dimensions: number): Float32Array | null => {
@@ -302,6 +414,53 @@ const searchByMeaning = async (
   }
 };
 
+const plainInterpretation = (query: string) => ({
+  semanticText: query,
+  constraints: [],
+  warnings: [],
+});
+
+/**
+ * Reads the query's constraints and works out which incidents they leave. `allowedIncidentIds` is
+ * undefined when nothing constrains the search, so an unconstrained search ranks exactly as before.
+ */
+const interpret = (query: string, facts: IncidentFacts) => {
+  const { semanticText, constraints, warnings } = parseQuery(query, facts);
+
+  const applied = constraints.map((constraint) => ({
+    constraint,
+    incidents: facts.incidentsWith(
+      constraint.entities.map((entity) => entity.entityId),
+      constraint.roles
+    ),
+  }));
+
+  const excluded = new Set(applied.flatMap(({ incidents }) => Array.from(incidents)));
+
+  const allowedIncidentIds =
+    applied.length > 0
+      ? new Set(Array.from(facts.incidentIds).filter((incidentId) => !excluded.has(incidentId)))
+      : undefined;
+
+  const interpretation = {
+    semanticText,
+    warnings,
+    constraints: applied.map(({ constraint, incidents }) => ({
+      kind: constraint.kind,
+      source: constraint.source,
+      matchedText: constraint.matchedText,
+      entities: constraint.entities.map(({ entityId, name, matchedBy }) => ({
+        entity_id: entityId,
+        name,
+        matchedBy,
+      })),
+      incidentCount: incidents.size,
+    })),
+  };
+
+  return { interpretation, allowedIncidentIds };
+};
+
 export const queryFields: GraphQLFieldConfigMap<any, Context> = {
   semanticSearch: {
     type: new GraphQLNonNull(SemanticSearchResponseType),
@@ -317,13 +476,27 @@ export const queryFields: GraphQLFieldConfigMap<any, Context> = {
         MAX_LIMIT
       );
 
+      if (!query) return { status: 'OK', results: [], interpretation: plainInterpretation(query) };
+
+      let facts: IncidentFacts;
+
+      try {
+        facts = await cachedFacts(FACTS_CACHE_KEY, () => loadIncidentFacts(context.client));
+      } catch (error) {
+        Sentry.captureException(error);
+        return { status: 'UNAVAILABLE', results: [], interpretation: plainInterpretation(query) };
+      }
+
       // Only the semantic text is embedded. It is settled here, before any embedding request,
-      // so a search with nothing to embed never spends one.
-      const semanticText = query;
+      // so a search with nothing to embed never spends one and excluded words are never sent.
+      const { interpretation, allowedIncidentIds } = interpret(query, facts);
+      const { semanticText } = interpretation;
 
-      if (!semanticText) return { status: 'OK', results: [] };
+      if (!semanticText) return { status: 'OK', results: [], interpretation };
 
-      return searchByMeaning(context, semanticText, limit);
+      const response = await searchByMeaning(context, semanticText, limit, allowedIncidentIds);
+
+      return { ...response, interpretation };
     },
   },
 };

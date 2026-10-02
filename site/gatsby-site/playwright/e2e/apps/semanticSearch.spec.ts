@@ -4,8 +4,15 @@ import { test } from '../../utils';
 
 const url = '/apps/semantic-search/';
 
-const response = (status: string, results: unknown[] = []) => ({
-  data: { semanticSearch: { status, results } },
+// The API returns an interpretation with every status. A query without constraints has nothing in it.
+const unconstrained = { semanticText: '', constraints: [], warnings: [] };
+
+const response = (
+  status: string,
+  results: unknown[] = [],
+  interpretation: unknown = unconstrained
+) => ({
+  data: { semanticSearch: { status, results, interpretation } },
 });
 
 const results = Array.from({ length: 30 }, (_, index) => ({
@@ -168,5 +175,83 @@ test.describe('Semantic Search', () => {
     await input.fill('unavailable');
     await submit.click();
     await expect(page.locator('[data-cy="semantic-search-unavailable"]')).toBeVisible();
+  });
+
+  test('shows how a query with an exclusion was read, alongside any status', async ({
+    page,
+    login,
+  }) => {
+    await login({ customData: { roles: ['subscriber'] } });
+
+    const excludingTesla = {
+      semanticText: 'self-driving car incidents',
+      constraints: [
+        {
+          kind: 'EXCLUDE_ENTITY',
+          matchedText: 'tesla',
+          incidentCount: 50,
+          entities: [
+            { entity_id: 'tesla', name: 'Tesla', matchedBy: 'NAME' },
+            { entity_id: 'tesla-autopilot', name: 'Tesla Autopilot', matchedBy: 'FAMILY' },
+          ],
+        },
+      ],
+      warnings: [{ code: 'UNRECOGNISED_EXCLUSION', text: 'robocall operators' }],
+    };
+
+    await page.route('**/graphql', async (route) => {
+      const request = route.request().postDataJSON();
+
+      if (request.operationName !== 'SemanticSearch') {
+        await route.continue();
+        return;
+      }
+
+      const replies: Record<string, unknown> = {
+        constrained: response('OK', results.slice(0, 2), excludingTesla),
+        'constrained but limited': response('QUOTA_EXHAUSTED', [], excludingTesla),
+        plain: response('OK', results.slice(0, 2)),
+      };
+
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(replies[request.variables.query]),
+      });
+    });
+
+    await page.goto(url);
+
+    const input = page.locator('[data-cy="semantic-search-input"]');
+    const submit = page.locator('[data-cy="semantic-search-submit"]');
+    const interpretation = page.locator('[data-cy="semantic-search-interpretation"]');
+    const exclusion = page.locator('[data-cy="semantic-search-exclusion"]');
+
+    await input.fill('constrained');
+    await submit.click();
+
+    await expect(page.locator('[data-cy="semantic-search-semantic-text"]')).toHaveText(
+      'Searching: self-driving car incidents'
+    );
+    await expect(exclusion).toHaveCount(1);
+    await expect(exclusion).toContainText('Excluding: Tesla');
+    await expect(exclusion).toContainText('2 entities · 50 incidents');
+    await expect(exclusion).toHaveAttribute('title', 'Tesla, Tesla Autopilot');
+    await expect(page.locator('[data-cy="semantic-search-warning"]')).toContainText(
+      'robocall operators'
+    );
+    await expect(page.locator('[data-cy="row"]')).toHaveCount(2);
+
+    await input.fill('constrained but limited');
+    await submit.click();
+
+    await expect(page.locator('[data-cy="semantic-search-limited"]')).toBeVisible();
+    await expect(exclusion).toContainText('Excluding: Tesla');
+
+    await input.fill('plain');
+    await submit.click();
+
+    await expect(page.locator('[data-cy="row"]')).toHaveCount(2);
+    await expect(interpretation).toHaveCount(0);
   });
 });
