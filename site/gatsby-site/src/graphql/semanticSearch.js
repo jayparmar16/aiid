@@ -17,6 +17,7 @@ export const SEMANTIC_SEARCH = gql(`
         semanticText
         constraints {
           kind
+          source
           matchedText
           incidentCount
           entities {

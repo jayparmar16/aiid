@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Button } from 'flowbite-react';
 import { Trans } from 'react-i18next';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
@@ -67,6 +67,79 @@ const buildColumns = (origin) => [
   },
 ];
 
+// Readable names for the constraint kinds and sources the page knows. Anything else is written as
+// the API names it, so constraints added to the search later still export.
+const kindLabels = { EXCLUDE_ENTITY: 'Excluding' };
+
+const sourceLabels = { QUERY_TEXT: 'Query text' };
+
+// Constraint fields with a column of their own. Every other field gets a column named after it.
+const constraintFields = [
+  '__typename',
+  'kind',
+  'matchedText',
+  'source',
+  'entities',
+  'incidentCount',
+];
+
+// Writes any field value as text, whatever shape a newer constraint field has.
+const toText = (value) => {
+  if (value == null) return '';
+
+  if (Array.isArray(value)) return value.map(toText).join(', ');
+
+  return typeof value === 'object' ? JSON.stringify(value) : String(value);
+};
+
+const searchColumns = [{ width: 24 }, { width: 45 }, { width: 14 }, { width: 60 }, { width: 10 }];
+
+/**
+ * Describes how the results were produced, so a colleague can understand and reproduce them: the
+ * submitted text, the part ranked by meaning, every constraint applied and anything that could not
+ * be applied. Sections without entries say "None" rather than disappearing.
+ */
+const buildSearchSheet = ({ query, interpretation, searchedAt }) => {
+  const constraints = interpretation?.constraints ?? [];
+
+  const warnings = interpretation?.warnings ?? [];
+
+  const otherFields = [
+    ...new Set(constraints.flatMap((constraint) => Object.keys(constraint))),
+  ].filter(
+    (field) =>
+      !constraintFields.includes(field) &&
+      constraints.some((constraint) => toText(constraint[field]) !== '')
+  );
+
+  const constraintRows = constraints.map((constraint) => [
+    kindLabels[constraint.kind] ?? toText(constraint.kind),
+    { value: constraint.matchedText ?? '', wrap: true },
+    sourceLabels[constraint.source] ?? toText(constraint.source),
+    { value: (constraint.entities ?? []).map((entity) => entity.name).join(', '), wrap: true },
+    constraint.incidentCount ?? null,
+    ...otherFields.map((field) => toText(constraint[field])),
+  ]);
+
+  const warningRows = warnings.map((warning) => [
+    warning.code,
+    { value: warning.text, wrap: true },
+  ]);
+
+  return [
+    [header('Query'), { value: query, wrap: true }],
+    [header('Semantic text'), { value: interpretation?.semanticText ?? '', wrap: true }],
+    // Excel cells carry no time zone, so the zone is written out.
+    [header('Searched at'), `${searchedAt.toISOString().slice(0, 19).replace('T', ' ')} UTC`],
+    [],
+    ['Constraint', 'Matched text', 'Source', 'Entities', 'Incidents', ...otherFields].map(header),
+    ...(constraintRows.length > 0 ? constraintRows : [['None']]),
+    [],
+    [header('Warning'), header('Text')],
+    ...(warningRows.length > 0 ? warningRows : [['None']]),
+  ];
+};
+
 const csvCell = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
 
 const buildCsv = (results, origin) => {
@@ -85,11 +158,22 @@ const buildCsv = (results, origin) => {
   return `\uFEFF${rows.map((row) => row.map(csvCell).join(',')).join('\r\n')}`;
 };
 
-/** Exports every returned result as CSV or Excel without depending on table pagination. */
-export default function ExcelExport({ results, query }) {
+/**
+ * Exports every returned result as CSV or Excel without depending on table pagination. The Excel
+ * file also describes the search that produced the results.
+ */
+export default function ExcelExport({ results, query, interpretation }) {
   const [exporting, setExporting] = useState(null);
 
   const [exportError, setExportError] = useState(false);
+
+  const [searchedAt, setSearchedAt] = useState(() => new Date());
+
+  // Apollo can hand over another search's results without remounting this, so the time follows
+  // the results rather than the mount.
+  useEffect(() => {
+    setSearchedAt(new Date());
+  }, [results]);
 
   const filename = (extension) => {
     const today = new Date().toISOString().slice(0, 10);
@@ -102,12 +186,20 @@ export default function ExcelExport({ results, query }) {
     setExportError(false);
 
     try {
-      const { default: writeExcelFile } = await import('write-excel-file/browser');
+      const { default: writeExcelFile, getSheetData } = await import('write-excel-file/browser');
 
-      await writeExcelFile(results, {
-        sheet: 'Results',
-        columns: buildColumns(window.location.origin),
-      }).toFile(filename('xlsx'));
+      const columns = buildColumns(window.location.origin);
+
+      // A file with several sheets takes rows rather than objects, so the results are converted
+      // first. The columns still set the widths.
+      await writeExcelFile([
+        { sheet: 'Results', data: getSheetData(results, columns), columns },
+        {
+          sheet: 'Search',
+          data: buildSearchSheet({ query, interpretation, searchedAt }),
+          columns: searchColumns,
+        },
+      ]).toFile(filename('xlsx'));
     } catch {
       setExportError(true);
     } finally {
