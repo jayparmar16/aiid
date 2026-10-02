@@ -63,6 +63,22 @@ describe('semantic search vector helpers', () => {
 
     expect(results[0]).toMatchObject({ incident_id: 7, score: 1 });
   });
+
+  it('fills the limit from allowed incidents only, even when a disallowed one scores higher', () => {
+    const results = rankIncidentVectors(
+      [
+        { incidentId: 1, overview: Float32Array.from([1, 0]), passages: [] },
+        { incidentId: 2, overview: Float32Array.from([0.8, 0.6]), passages: [] },
+        { incidentId: 3, overview: Float32Array.from([0.6, 0.8]), passages: [] },
+      ],
+      [1, 0],
+      1,
+      0.15,
+      new Set([2, 3])
+    );
+
+    expect(results.map((result) => result.incident_id)).toEqual([2]);
+  });
 });
 
 describe('semanticSearch GraphQL field', () => {

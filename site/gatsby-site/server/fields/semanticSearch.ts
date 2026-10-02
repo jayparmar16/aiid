@@ -67,17 +67,36 @@ export interface CachedIncidentVectors {
   passages: Float32Array[];
 }
 
-interface VectorCache {
-  key: string;
-  incidents: CachedIncidentVectors[];
-  loadedAt: number;
-}
+const cacheResets: (() => void)[] = [];
 
-let cache: VectorCache | null = null;
-
+/** Clears every warm cache in this module, since each one registers its reset here. */
 export const resetSemanticSearchCache = () => {
-  cache = null;
+  for (const reset of cacheResets) reset();
 };
+
+/**
+ * Keeps one loaded value on a warm function for CACHE_TTL_MS, loading again when the key changes
+ * or the value expires. A value that fails `keep` is returned without being cached.
+ */
+const createWarmCache = <T>(keep: (value: T) => boolean = () => true) => {
+  let entry: { key: string; value: T; loadedAt: number } | null = null;
+
+  cacheResets.push(() => {
+    entry = null;
+  });
+
+  return async (key: string, load: () => Promise<T>): Promise<T> => {
+    if (entry?.key === key && Date.now() - entry.loadedAt < CACHE_TTL_MS) return entry.value;
+
+    const value = await load();
+    if (keep(value)) entry = { key, value, loadedAt: Date.now() };
+
+    return value;
+  };
+};
+
+// An empty load is not kept, so vectors written after it are found by the next search.
+const cachedVectors = createWarmCache<CachedIncidentVectors[]>((incidents) => incidents.length > 0);
 
 /** Converts BSON Float32 vector data to a unit vector, rejecting malformed values. */
 export const normaliseBinaryVector = (value: unknown, dimensions: number): Float32Array | null => {
@@ -132,12 +151,17 @@ const dot = (left: Float32Array, right: Float32Array): number => {
   return score;
 };
 
-/** Ranks the cached overview and passage vectors without allocating per-vector number arrays. */
+/**
+ * Ranks the cached overview and passage vectors without allocating per-vector number arrays.
+ * When `allowedIncidentIds` is given, every other incident is skipped before scoring, so the
+ * limit is filled from allowed incidents only.
+ */
 export const rankIncidentVectors = (
   incidents: CachedIncidentVectors[],
   query: number[],
   limit: number,
-  minimumScore = MIN_SCORE
+  minimumScore = MIN_SCORE,
+  allowedIncidentIds?: ReadonlySet<number>
 ): { incident_id: number; score: number }[] => {
   const normalisedQuery = normaliseQueryVector(query);
   if (!normalisedQuery) return [];
@@ -145,6 +169,7 @@ export const rankIncidentVectors = (
   const hits: { incident_id: number; score: number }[] = [];
 
   for (const incident of incidents) {
+    if (allowedIncidentIds && !allowedIncidentIds.has(incident.incidentId)) continue;
     if (incident.overview.length !== normalisedQuery.length) continue;
 
     const overviewScore = dot(incident.overview, normalisedQuery);
@@ -166,58 +191,51 @@ export const rankIncidentVectors = (
 };
 
 /** Streams schema-v2 BSON vectors into a compact warm-function cache. */
-const loadVectors = async (
+const loadVectors = (
   context: Context,
   model: string,
   profileId: string,
   dimensions: number
-): Promise<CachedIncidentVectors[]> => {
-  const key = `${EMBEDDING_SCHEMA_VERSION}:${model}:${profileId}:${dimensions}`;
-
-  if (cache?.key === key && Date.now() - cache.loadedAt < CACHE_TTL_MS) {
-    return cache.incidents;
-  }
-
-  const cursor = context.client
-    .db('aiidprod')
-    .collection('incident_embeddings')
-    .find(
-      {
-        embedding_schema_version: EMBEDDING_SCHEMA_VERSION,
-        embedding_profile: profileId,
-        model,
-        dims: dimensions,
-      },
-      {
-        projection: {
-          _id: 0,
-          incident_id: 1,
-          'overview.vector': 1,
-          'passages.vector': 1,
+): Promise<CachedIncidentVectors[]> =>
+  cachedVectors(`${EMBEDDING_SCHEMA_VERSION}:${model}:${profileId}:${dimensions}`, async () => {
+    const cursor = context.client
+      .db('aiidprod')
+      .collection('incident_embeddings')
+      .find(
+        {
+          embedding_schema_version: EMBEDDING_SCHEMA_VERSION,
+          embedding_profile: profileId,
+          model,
+          dims: dimensions,
         },
-      }
-    )
-    .sort({ incident_id: 1 });
+        {
+          projection: {
+            _id: 0,
+            incident_id: 1,
+            'overview.vector': 1,
+            'passages.vector': 1,
+          },
+        }
+      )
+      .sort({ incident_id: 1 });
 
-  const incidents: CachedIncidentVectors[] = [];
+    const incidents: CachedIncidentVectors[] = [];
 
-  for await (const document of cursor) {
-    const overview = normaliseBinaryVector(document.overview?.vector, dimensions);
-    if (!overview) continue;
+    for await (const document of cursor) {
+      const overview = normaliseBinaryVector(document.overview?.vector, dimensions);
+      if (!overview) continue;
 
-    const passages = Array.isArray(document.passages)
-      ? document.passages
-          .map((passage: any) => normaliseBinaryVector(passage?.vector, dimensions))
-          .filter((vector): vector is Float32Array => vector !== null)
-      : [];
+      const passages = Array.isArray(document.passages)
+        ? document.passages
+            .map((passage: any) => normaliseBinaryVector(passage?.vector, dimensions))
+            .filter((vector): vector is Float32Array => vector !== null)
+        : [];
 
-    incidents.push({ incidentId: document.incident_id, overview, passages });
-  }
+      incidents.push({ incidentId: document.incident_id, overview, passages });
+    }
 
-  if (incidents.length > 0) cache = { key, incidents, loadedAt: Date.now() };
-
-  return incidents;
-};
+    return incidents;
+  });
 
 type Embedded =
   | { model: string; profileId: string; vector: number[] }
@@ -239,6 +257,51 @@ const embedQuery = async (query: string): Promise<Embedded> => {
   }
 };
 
+interface SearchResponse {
+  status: 'OK' | 'QUOTA_EXHAUSTED' | 'UNAVAILABLE';
+  results: { score: number; incident: DBIncident }[];
+}
+
+/** Embeds the semantic text and returns the allowed incidents that are closest to it in meaning. */
+const searchByMeaning = async (
+  context: Context,
+  semanticText: string,
+  limit: number,
+  allowedIncidentIds?: ReadonlySet<number>
+): Promise<SearchResponse> => {
+  const embedded = await embedQuery(semanticText);
+  if ('status' in embedded) return { status: embedded.status, results: [] };
+
+  try {
+    const stored = await loadVectors(
+      context,
+      embedded.model,
+      embedded.profileId,
+      embedded.vector.length
+    );
+
+    if (stored.length === 0) return { status: 'UNAVAILABLE', results: [] };
+
+    const hits = rankIncidentVectors(stored, embedded.vector, limit, MIN_SCORE, allowedIncidentIds);
+    const incidents = await context.client
+      .db('aiidprod')
+      .collection<DBIncident>('incidents')
+      .find({ incident_id: { $in: hits.map((hit) => hit.incident_id) } })
+      .toArray();
+    const byId = new Map(incidents.map((incident) => [incident.incident_id, incident]));
+    const results = hits.flatMap((hit) => {
+      const incident = byId.get(hit.incident_id);
+
+      return incident ? [{ score: hit.score, incident }] : [];
+    });
+
+    return { status: 'OK', results };
+  } catch (error) {
+    Sentry.captureException(error);
+    return { status: 'UNAVAILABLE', results: [] };
+  }
+};
+
 export const queryFields: GraphQLFieldConfigMap<any, Context> = {
   semanticSearch: {
     type: new GraphQLNonNull(SemanticSearchResponseType),
@@ -254,37 +317,13 @@ export const queryFields: GraphQLFieldConfigMap<any, Context> = {
         MAX_LIMIT
       );
 
-      if (!query) return { status: 'OK', results: [] };
+      // Only the semantic text is embedded. It is settled here, before any embedding request,
+      // so a search with nothing to embed never spends one.
+      const semanticText = query;
 
-      const embedded = await embedQuery(query);
-      if ('status' in embedded) return { status: embedded.status, results: [] };
+      if (!semanticText) return { status: 'OK', results: [] };
 
-      try {
-        const stored = await loadVectors(
-          context,
-          embedded.model,
-          embedded.profileId,
-          embedded.vector.length
-        );
-
-        if (stored.length === 0) return { status: 'UNAVAILABLE', results: [] };
-
-        const hits = rankIncidentVectors(stored, embedded.vector, limit);
-        const incidents = await context.client
-          .db('aiidprod')
-          .collection<DBIncident>('incidents')
-          .find({ incident_id: { $in: hits.map((hit) => hit.incident_id) } })
-          .toArray();
-        const byId = new Map(incidents.map((incident) => [incident.incident_id, incident]));
-        const results = hits
-          .filter((hit) => byId.has(hit.incident_id))
-          .map((hit) => ({ score: hit.score, incident: byId.get(hit.incident_id) }));
-
-        return { status: 'OK', results };
-      } catch (error) {
-        Sentry.captureException(error);
-        return { status: 'UNAVAILABLE', results: [] };
-      }
+      return searchByMeaning(context, semanticText, limit);
     },
   },
 };
