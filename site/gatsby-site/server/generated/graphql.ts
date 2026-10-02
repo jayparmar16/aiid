@@ -2519,6 +2519,8 @@ export type SemanticSearchEntity = {
 export enum SemanticSearchEntityMatch {
   /** The entity's name contains what was written, as with a product named after its company. */
   Family = 'FAMILY',
+  /** Editors linked the entity to the one whose whole name was written. Only direct links are followed. */
+  Link = 'LINK',
   /** The entity's whole name was written. */
   Name = 'NAME'
 }

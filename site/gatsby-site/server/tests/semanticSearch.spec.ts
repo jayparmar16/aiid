@@ -450,6 +450,8 @@ describe('semanticSearch exclusions', () => {
       ],
     });
 
+    await seedCollection({ name: 'entity_relationships', docs: [] });
+
     // Scores against the query vector [1, 0]: 10 > 11 > 12 > 13 > 15, and 14 is below the threshold.
     await seedCollection({
       name: 'incidents',
@@ -680,5 +682,194 @@ describe('semanticSearch exclusions', () => {
     resetSemanticSearchCache();
 
     expect(excludedIds(await search('crashes excluding nova'))).toEqual([['nova']]);
+  });
+
+  describe('linked entities', () => {
+    const link = (sub: string, obj: string, is_symmetric = true) => ({
+      sub,
+      obj,
+      is_symmetric,
+      pred: 'related',
+    });
+
+    const seedLinks = (...links: ReturnType<typeof link>[]) =>
+      seedCollection({ name: 'entity_relationships', docs: links });
+
+    beforeEach(async () => {
+      embedAs([1, 0]);
+
+      await seedCollection({
+        name: 'entities',
+        docs: [
+          { entity_id: 'meta', name: 'Meta' },
+          { entity_id: 'facebook', name: 'Facebook' },
+          { entity_id: 'instagram', name: 'Instagram' },
+          { entity_id: 'mobileye', name: 'Mobileye' },
+          {
+            entity_id: 'people-recorded-by-smart-glasses',
+            name: 'People recorded by smart glasses',
+          },
+        ],
+        drop: false,
+      });
+
+      // Scores continue below incident 15: 20 > 21 > 22 > 23 > 24.
+      await seedCollection({
+        name: 'incidents',
+        docs: [
+          incident(20, 'Meta chatbot flirts with teenagers', { deployer: ['meta'] }),
+          // Recorded before the rename, so only Facebook is tagged.
+          incident(21, 'Facebook ads hide jobs from older people', { deployer: ['facebook'] }),
+          incident(22, 'Instagram recommends harmful diets', { deployer: ['instagram'] }),
+          incident(23, 'Camera misreads a speed sign', { developer: ['mobileye'] }),
+          incident(24, 'Smart glasses identify strangers', {
+            harmed: ['people-recorded-by-smart-glasses'],
+          }),
+        ],
+        drop: false,
+      });
+
+      await seedCollection({
+        name: 'incident_embeddings',
+        docs: [
+          vectors(20, [0.7, 0.71]),
+          vectors(21, [0.6, 0.8]),
+          vectors(22, [0.5, 0.87]),
+          vectors(23, [0.4, 0.92]),
+          vectors(24, [0.3, 0.95]),
+        ],
+        drop: false,
+      });
+    });
+
+    it('keeps Facebook-only incidents when nothing links Meta and Facebook', async () => {
+      const response = await search('social media harms excluding meta');
+
+      expect(excludedIds(response)).toEqual([['meta']]);
+      expect(resultIds(response)).toEqual([10, 11, 12, 13, 15, 21, 22, 23, 24]);
+    });
+
+    it('excludes the entities linked to a named one, following the link either way', async () => {
+      await seedLinks(link('facebook', 'meta'));
+
+      const meta = await search('social media harms excluding meta');
+
+      expect(interpretationOf(meta).constraints).toEqual([
+        {
+          kind: 'EXCLUDE_ENTITY',
+          source: 'QUERY_TEXT',
+          matchedText: 'meta',
+          incidentCount: 2,
+          entities: [
+            { entity_id: 'meta', name: 'Meta', matchedBy: 'NAME' },
+            { entity_id: 'facebook', name: 'Facebook', matchedBy: 'LINK' },
+          ],
+        },
+      ]);
+      expect(resultIds(meta)).toEqual([10, 11, 12, 13, 15, 22, 23, 24]);
+
+      const facebook = await search('social media harms excluding facebook');
+
+      expect(interpretationOf(facebook).constraints[0].entities).toEqual([
+        { entity_id: 'facebook', name: 'Facebook', matchedBy: 'NAME' },
+        { entity_id: 'meta', name: 'Meta', matchedBy: 'LINK' },
+      ]);
+      expect(resultIds(facebook)).toEqual([10, 11, 12, 13, 15, 22, 23, 24]);
+      expect(embedded).toEqual(['social media harms', 'social media harms']);
+    });
+
+    it('follows one link and no further', async () => {
+      await seedLinks(link('meta', 'facebook'), link('facebook', 'instagram'));
+
+      const response = await search('social media harms excluding meta');
+
+      expect(excludedIds(response)).toEqual([['meta', 'facebook']]);
+      expect(resultIds(response)).toEqual([10, 11, 12, 13, 15, 22, 23, 24]);
+    });
+
+    it('follows links from the named entity only and lists linked entities last', async () => {
+      // As in the real data, a Meta-family entity is linked to Meta and also to every scammer.
+      await seedCollection({
+        name: 'entities',
+        docs: [
+          {
+            entity_id: 'unknown-scammers-operating-meta-ad-accounts',
+            name: 'Unknown scammers operating Meta ad accounts',
+          },
+          { entity_id: 'scammers', name: 'Scammers' },
+        ],
+        drop: false,
+      });
+      await seedCollection({
+        name: 'incidents',
+        docs: [
+          incident(25, 'Fake Meta ads sell a bogus investment', {
+            deployer: ['unknown-scammers-operating-meta-ad-accounts'],
+          }),
+          incident(26, 'Voice clone scams a grandmother', { deployer: ['scammers'] }),
+        ],
+        drop: false,
+      });
+      await seedCollection({
+        name: 'incident_embeddings',
+        docs: [vectors(25, [0.25, 0.97]), vectors(26, [0.2, 0.98])],
+        drop: false,
+      });
+      await seedLinks(
+        link('facebook', 'meta'),
+        link('unknown-scammers-operating-meta-ad-accounts', 'meta'),
+        link('unknown-scammers-operating-meta-ad-accounts', 'scammers')
+      );
+
+      const response = await search('social media harms excluding meta');
+
+      expect(interpretationOf(response).constraints[0]).toMatchObject({
+        incidentCount: 3,
+        entities: [
+          { entity_id: 'meta', name: 'Meta', matchedBy: 'NAME' },
+          {
+            entity_id: 'unknown-scammers-operating-meta-ad-accounts',
+            name: 'Unknown scammers operating Meta ad accounts',
+            matchedBy: 'FAMILY',
+          },
+          { entity_id: 'facebook', name: 'Facebook', matchedBy: 'LINK' },
+        ],
+      });
+      expect(resultIds(response)).toEqual([10, 11, 12, 13, 15, 22, 23, 24, 26]);
+    });
+
+    it('adds nothing for a linked entity that is never responsible for an incident', async () => {
+      await seedLinks(link('meta', 'people-recorded-by-smart-glasses'));
+
+      const response = await search('social media harms excluding meta');
+
+      expect(excludedIds(response)).toEqual([['meta']]);
+      expect(interpretationOf(response).constraints[0].incidentCount).toBe(1);
+      expect(resultIds(response)).toEqual([10, 11, 12, 13, 15, 21, 22, 23, 24]);
+    });
+
+    it('follows a link marked as not symmetric from sub to obj only', async () => {
+      await seedLinks(link('instagram', 'meta', false));
+
+      expect(excludedIds(await search('social media harms excluding instagram'))).toEqual([
+        ['instagram', 'meta'],
+      ]);
+      expect(excludedIds(await search('social media harms excluding meta'))).toEqual([['meta']]);
+    });
+
+    it('keeps links until the cache is reset, then follows new ones', async () => {
+      expect(excludedIds(await search('social media harms excluding meta'))).toEqual([['meta']]);
+
+      await seedLinks(link('facebook', 'meta'));
+
+      expect(excludedIds(await search('social media harms excluding meta'))).toEqual([['meta']]);
+
+      resetSemanticSearchCache();
+
+      const response = await search('social media harms excluding meta');
+
+      expect(excludedIds(response)).toEqual([['meta', 'facebook']]);
+      expect(resultIds(response)).toEqual([10, 11, 12, 13, 15, 22, 23, 24]);
+    });
   });
 });

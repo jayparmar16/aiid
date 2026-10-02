@@ -14,8 +14,11 @@ export const RESPONSIBLE_ROLES: readonly EntityRole[] = ['deployer', 'developer'
 export interface ResolvedEntity {
   entityId: string;
   name: string;
-  /** NAME when the entity's whole name was written, FAMILY when its name contains what was written. */
-  matchedBy: 'NAME' | 'FAMILY';
+  /**
+   * NAME when the entity's whole name was written, FAMILY when its name contains what was written,
+   * LINK when editors linked it to the NAME entity.
+   */
+  matchedBy: 'NAME' | 'FAMILY' | 'LINK';
 }
 
 export interface Vocabulary {
@@ -23,7 +26,8 @@ export interface Vocabulary {
    * The entities occurring in `roles` that a name written as `words` covers, or an empty list when
    * the words are not a known name or none of the covered entities occurs in those roles. A known
    * name is an entity's whole name or, with `allowNameStart`, the first words of one ("clearview"
-   * for "Clearview AI").
+   * for "Clearview AI"). The covered entities are the name's family and the entities linked to the
+   * named entity, ordered NAME, FAMILY, LINK.
    */
   resolve: (
     words: string[],
