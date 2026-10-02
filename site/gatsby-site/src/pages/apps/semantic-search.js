@@ -16,6 +16,18 @@ const exampleQueries = [
 ];
 
 /**
+ * Sends each held constraint back as one explicit filter on its first entity. The search lists the
+ * entity whose whole name was written first, and filtering on it expands to the same entities
+ * again. A constraint read from the first words of several names ("gpt") has no such entity, so
+ * it comes back covering only its first entity's own family.
+ */
+const filtersFor = (constraints) => ({
+  excludeEntities: constraints
+    .filter((constraint) => constraint.kind === 'EXCLUDE_ENTITY')
+    .map((constraint) => constraint.entities[0].entity_id),
+});
+
+/**
  * Searches incidents by meaning using stored incident embeddings. Forms and example buttons share
  * the same execution path, and Apollo's cache answers a repeated query without another request.
  */
@@ -26,25 +38,54 @@ export default function SemanticSearchPage() {
 
   const [submitted, setSubmitted] = useState('');
 
+  // The constraints of the latest search, shown as removable chips and sent with the next one.
+  const [constraints, setConstraints] = useState([]);
+
   const [search, { data, loading, error }] = useLazyQuery(SEMANTIC_SEARCH);
 
   const response = data?.semanticSearch;
 
   const results = response?.status === 'OK' ? response.results : [];
 
-  const runSearch = (value) => {
-    const query = value.trim();
-
-    if (!query) return;
+  /**
+   * Searches the text together with the held constraints. Once the text has been read, the box
+   * keeps only what is left to rank by meaning and the chips hold the constraints, so the next
+   * search parses only newly typed text and never applies a constraint twice.
+   */
+  const runSearch = async (text, held) => {
+    const query = text.trim();
 
     setInput(query);
     setSubmitted(query);
-    search({ variables: { query } });
+    setConstraints(held);
+
+    const { data: next, error: failed } = await search({
+      variables: { query, filters: filtersFor(held) },
+    });
+
+    const interpretation = next?.semanticSearch.interpretation;
+
+    if (failed || !interpretation) return;
+
+    setConstraints(interpretation.constraints);
+
+    // A query in which nothing was read stays exactly as typed.
+    if (interpretation.constraints.length > 0 || interpretation.warnings.length > 0) {
+      setInput(interpretation.semanticText);
+    }
   };
+
+  const canSearch = Boolean(input.trim()) || constraints.length > 0;
 
   const onSubmit = (event) => {
     event.preventDefault();
-    runSearch(input);
+    if (canSearch) runSearch(input, constraints);
+  };
+
+  const removeConstraint = (removed) => {
+    const remaining = constraints.filter((constraint) => constraint !== removed);
+
+    runSearch(input, remaining);
   };
 
   return (
@@ -70,7 +111,7 @@ export default function SemanticSearchPage() {
               key={query}
               type="button"
               disabled={loading}
-              onClick={() => runSearch(query)}
+              onClick={() => runSearch(query, constraints)}
               className="rounded-full border border-blue-300 px-3 py-1 text-sm text-blue-700 hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
               data-cy={`semantic-search-example-${index + 1}`}
             >
@@ -88,11 +129,7 @@ export default function SemanticSearchPage() {
             placeholder={t('Describe an incident in your own words')}
             data-cy="semantic-search-input"
           />
-          <Button
-            type="submit"
-            disabled={loading || !input.trim()}
-            data-cy="semantic-search-submit"
-          >
+          <Button type="submit" disabled={loading || !canSearch} data-cy="semantic-search-submit">
             <Trans>Search</Trans>
           </Button>
         </form>
@@ -100,7 +137,14 @@ export default function SemanticSearchPage() {
         {loading && <Spinner />}
 
         {/* Shown with every status, so a refused search still says how the query was read. */}
-        {!loading && <SearchInterpretation interpretation={response?.interpretation} />}
+        {!loading && (
+          <SearchInterpretation
+            semanticText={response?.interpretation.semanticText}
+            constraints={constraints}
+            warnings={response?.interpretation.warnings}
+            onRemove={removeConstraint}
+          />
+        )}
 
         {!loading && (error || response?.status === 'UNAVAILABLE') && (
           <p className="text-red-700" data-cy="semantic-search-unavailable">

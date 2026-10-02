@@ -36,7 +36,8 @@ export interface Vocabulary {
 
 export interface ExcludeEntityConstraint {
   kind: 'EXCLUDE_ENTITY';
-  source: 'QUERY_TEXT';
+  source: 'QUERY_TEXT' | 'EXPLICIT_FILTER';
+  /** The words written in the query or, for an explicit filter, the filtered entity's name. */
   matchedText: string;
   roles: readonly EntityRole[];
   entities: ResolvedEntity[];
@@ -45,7 +46,7 @@ export interface ExcludeEntityConstraint {
 export type Constraint = ExcludeEntityConstraint;
 
 export interface InterpretationWarning {
-  code: 'UNRECOGNISED_EXCLUSION';
+  code: 'UNRECOGNISED_EXCLUSION' | 'UNKNOWN_ENTITY';
   text: string;
 }
 

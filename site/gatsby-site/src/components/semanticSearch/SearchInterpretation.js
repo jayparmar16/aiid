@@ -1,14 +1,18 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
+import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
+import { faXmark } from '@fortawesome/free-solid-svg-icons';
 
 // Spells out "1 entity" or "6 entities", since these strings have no plural translations.
 const counted = (t, count, one, many) => (count === 1 ? t(one) : t(many, { count }));
 
 /** One exclusion, labelled with the entity whose name was written, listing every entity it covers. */
-function ExclusionChip({ constraint }) {
+function ExclusionChip({ constraint, onRemove }) {
   const { t } = useTranslation();
 
   const named = constraint.entities.find((entity) => entity.matchedBy === 'NAME');
+
+  const name = named?.name ?? constraint.matchedText;
 
   return (
     <span
@@ -16,26 +20,37 @@ function ExclusionChip({ constraint }) {
       className="inline-flex items-center gap-2 rounded-full border border-red-300 bg-red-50 px-3 py-1 text-sm text-red-800"
       data-cy="semantic-search-exclusion"
     >
-      <span>{t('Excluding: {{name}}', { name: named?.name ?? constraint.matchedText })}</span>
+      <span>{t('Excluding: {{name}}', { name })}</span>
       <span className="text-xs text-red-600">
         {counted(t, constraint.entities.length, '1 entity', '{{count}} entities')}
         {' · '}
         {counted(t, constraint.incidentCount, '1 incident', '{{count}} incidents')}
       </span>
+      <button
+        type="button"
+        onClick={onRemove}
+        aria-label={t('Stop excluding {{name}}', { name })}
+        className="-mr-1 rounded-full px-1 text-red-600 hover:bg-red-100 hover:text-red-900 focus:outline-none focus:ring-2 focus:ring-red-500"
+        data-cy="semantic-search-remove-constraint"
+      >
+        <FontAwesomeIcon icon={faXmark} />
+      </button>
     </span>
   );
 }
 
 /**
  * Shows how a query was read: the part ranked by meaning, each constraint applied to the results,
- * and anything that could not be applied. A query without constraints needs no explanation.
+ * and anything that could not be applied. Each constraint can be removed, which searches again
+ * without it. A query without constraints needs no explanation.
  */
-export default function SearchInterpretation({ interpretation }) {
+export default function SearchInterpretation({
+  semanticText,
+  constraints,
+  warnings = [],
+  onRemove,
+}) {
   const { t } = useTranslation();
-
-  if (!interpretation) return null;
-
-  const { semanticText, constraints, warnings } = interpretation;
 
   if (constraints.length === 0 && warnings.length === 0) return null;
 
@@ -51,14 +66,22 @@ export default function SearchInterpretation({ interpretation }) {
           </span>
         )}
         {constraints.map((constraint, index) => (
-          <ExclusionChip key={index} constraint={constraint} />
+          <ExclusionChip
+            key={index}
+            constraint={constraint}
+            onRemove={() => onRemove(constraint)}
+          />
         ))}
       </div>
       {warnings.map((warning, index) => (
         <p key={index} className="mt-2 text-sm text-amber-700" data-cy="semantic-search-warning">
-          {t('Could not exclude “{{text}}”: no organisation or system has that name.', {
-            text: warning.text,
-          })}
+          {warning.code === 'UNKNOWN_ENTITY'
+            ? t('Could not exclude “{{text}}”: no organisation or system has that id.', {
+                text: warning.text,
+              })
+            : t('Could not exclude “{{text}}”: no organisation or system has that name.', {
+                text: warning.text,
+              })}
         </p>
       ))}
     </div>

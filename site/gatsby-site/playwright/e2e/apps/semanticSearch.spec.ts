@@ -254,4 +254,95 @@ test.describe('Semantic Search', () => {
     await expect(page.locator('[data-cy="row"]')).toHaveCount(2);
     await expect(interpretation).toHaveCount(0);
   });
+
+  test('holds constraints as removable chips and sends them back as explicit filters', async ({
+    page,
+    login,
+  }) => {
+    await login({ customData: { roles: ['subscriber'] } });
+
+    const tesla = {
+      kind: 'EXCLUDE_ENTITY',
+      matchedText: 'tesla',
+      incidentCount: 50,
+      entities: [
+        { entity_id: 'tesla', name: 'Tesla', matchedBy: 'NAME' },
+        { entity_id: 'tesla-autopilot', name: 'Tesla Autopilot', matchedBy: 'FAMILY' },
+      ],
+    };
+
+    const waymo = {
+      kind: 'EXCLUDE_ENTITY',
+      matchedText: 'waymo',
+      incidentCount: 12,
+      entities: [{ entity_id: 'waymo', name: 'Waymo', matchedBy: 'NAME' }],
+    };
+
+    const readAs = (constraints: unknown[]) => ({
+      semanticText: 'self-driving car incidents',
+      constraints,
+      warnings: [],
+    });
+
+    // The reply to each search in turn. The server merges the filters sent with what was typed.
+    const replies = [readAs([tesla]), readAs([tesla, waymo]), readAs([waymo])];
+    const requests: unknown[] = [];
+
+    await page.route('**/graphql', async (route) => {
+      const request = route.request().postDataJSON();
+
+      if (request.operationName !== 'SemanticSearch') {
+        await route.continue();
+        return;
+      }
+
+      requests.push(request.variables);
+
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(response('OK', results.slice(0, 2), replies[requests.length - 1])),
+      });
+    });
+
+    await page.goto(url);
+
+    const input = page.locator('[data-cy="semantic-search-input"]');
+    const submit = page.locator('[data-cy="semantic-search-submit"]');
+    const exclusion = page.locator('[data-cy="semantic-search-exclusion"]');
+
+    await input.fill('self-driving car incidents excluding tesla');
+    await submit.click();
+
+    await expect(exclusion).toHaveCount(1);
+    await expect(exclusion).toContainText('Excluding: Tesla');
+    await expect(input).toHaveValue('self-driving car incidents');
+
+    await input.fill('self-driving car incidents excluding waymo');
+    await submit.click();
+
+    await expect(exclusion).toHaveCount(2);
+    await expect(exclusion.nth(1)).toContainText('Excluding: Waymo');
+    await expect(input).toHaveValue('self-driving car incidents');
+
+    await exclusion
+      .filter({ hasText: 'Tesla' })
+      .locator('[data-cy="semantic-search-remove-constraint"]')
+      .click();
+
+    // Each chip goes back as one filter on its first entity, never one per entity it covers.
+    await expect
+      .poll(() => requests)
+      .toEqual([
+        { query: 'self-driving car incidents excluding tesla', filters: { excludeEntities: [] } },
+        {
+          query: 'self-driving car incidents excluding waymo',
+          filters: { excludeEntities: ['tesla'] },
+        },
+        { query: 'self-driving car incidents', filters: { excludeEntities: ['waymo'] } },
+      ]);
+    await expect(exclusion).toHaveCount(1);
+    await expect(exclusion).toContainText('Excluding: Waymo');
+    await expect(input).toHaveValue('self-driving car incidents');
+  });
 });

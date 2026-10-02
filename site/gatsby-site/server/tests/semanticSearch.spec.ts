@@ -372,11 +372,14 @@ describe('semanticSearch exclusions', () => {
     passages: [],
   });
 
-  const search = (query: string, limit?: number) =>
+  const search = (
+    query: string,
+    variables: { limit?: number; filters?: { excludeEntities?: string[] } } = {}
+  ) =>
     makeRequest(url, {
       query: `
-        query SemanticSearch($query: String!, $limit: Int) {
-          semanticSearch(query: $query, limit: $limit) {
+        query SemanticSearch($query: String!, $limit: Int, $filters: SemanticSearchFilters) {
+          semanticSearch(query: $query, limit: $limit, filters: $filters) {
             status
             results { incident { incident_id } }
             interpretation {
@@ -393,7 +396,7 @@ describe('semanticSearch exclusions', () => {
           }
         }
       `,
-      variables: { query, limit },
+      variables: { query, ...variables },
     });
 
   const resultIds = (response: any) =>
@@ -634,7 +637,7 @@ describe('semanticSearch exclusions', () => {
   it('fills the limit from incidents left after exclusion', async () => {
     embedAs([1, 0]);
 
-    const response = await search('crashes excluding tesla', 1);
+    const response = await search('crashes excluding tesla', { limit: 1 });
 
     expect(resultIds(response)).toEqual([12]);
   });
@@ -680,5 +683,126 @@ describe('semanticSearch exclusions', () => {
     resetSemanticSearchCache();
 
     expect(excludedIds(await search('crashes excluding nova'))).toEqual([['nova']]);
+  });
+
+  it('applies an explicit exclusion exactly as a typed one', async () => {
+    embedAs([1, 0]);
+
+    const typed = await search('self-driving car incidents excluding tesla');
+    const explicit = await search('self-driving car incidents', {
+      filters: { excludeEntities: ['tesla'] },
+    });
+
+    expect(explicit.body.errors).toBeUndefined();
+    expect(embedded).toEqual(['self-driving car incidents', 'self-driving car incidents']);
+    expect(resultIds(explicit)).toEqual([12, 13, 15]);
+    expect(interpretationOf(explicit)).toEqual({
+      semanticText: 'self-driving car incidents',
+      warnings: [],
+      constraints: [
+        {
+          ...interpretationOf(typed).constraints[0],
+          source: 'EXPLICIT_FILTER',
+          matchedText: 'Tesla',
+        },
+      ],
+    });
+  });
+
+  it('merges explicit and typed exclusions, keeping each one once', async () => {
+    embedAs([1, 0]);
+
+    const response = await search('crashes excluding waymo and teslas', {
+      filters: { excludeEntities: ['tesla', 'uber', 'tesla'] },
+    });
+
+    expect(embedded).toEqual(['crashes']);
+    expect(
+      interpretationOf(response).constraints.map(({ source, matchedText }: any) => [
+        source,
+        matchedText,
+      ])
+    ).toEqual([
+      ['EXPLICIT_FILTER', 'Tesla'],
+      ['EXPLICIT_FILTER', 'Uber'],
+      ['QUERY_TEXT', 'waymo'],
+    ]);
+    expect(resultIds(response)).toEqual([15]);
+  });
+
+  it('reproduces each constraint from its first entity, as the page sends them back', async () => {
+    embedAs([1, 0]);
+
+    const typed = await search('crashes excluding tesla, waymo and clearview');
+    const { semanticText, constraints } = interpretationOf(typed);
+
+    const held = await search(semanticText, {
+      filters: {
+        excludeEntities: constraints.map((constraint: any) => constraint.entities[0].entity_id),
+      },
+    });
+
+    expect(embedded).toEqual(['crashes', 'crashes']);
+    expect(excludedIds(held)).toEqual(excludedIds(typed));
+    expect(
+      interpretationOf(held).constraints.map((constraint: any) => constraint.incidentCount)
+    ).toEqual(constraints.map((constraint: any) => constraint.incidentCount));
+    expect(resultIds(held)).toEqual(resultIds(typed));
+  });
+
+  it('reports unknown entity ids as warnings and searches without them', async () => {
+    embedAs([1, 0]);
+
+    const response = await search('crashes', {
+      filters: { excludeEntities: ['no-such-entity', 'tesla-drivers'] },
+    });
+
+    expect(response.body.errors).toBeUndefined();
+    expect(response.body.data.semanticSearch.status).toBe('OK');
+    expect(interpretationOf(response)).toEqual({
+      semanticText: 'crashes',
+      constraints: [],
+      warnings: [
+        { code: 'UNKNOWN_ENTITY', text: 'no-such-entity' },
+        // Tesla drivers are only ever a harmed party, so there is nothing to exclude them from.
+        { code: 'UNKNOWN_ENTITY', text: 'tesla-drivers' },
+      ],
+    });
+    expect(resultIds(response)).toEqual([10, 11, 12, 13, 15]);
+  });
+
+  it('reads explicit filters when the query is empty, without embedding anything', async () => {
+    embedAs([1, 0]);
+
+    const response = await search('  ', { filters: { excludeEntities: ['tesla'] } });
+
+    expect(response.body.errors).toBeUndefined();
+    expect(embedded).toEqual([]);
+    expect(interpretationOf(response).semanticText).toBe('');
+    expect(excludedIds(response)).toEqual([
+      ['tesla', 'tesla-autopilot', 'tesla-full-self-driving-(fsd)'],
+    ]);
+  });
+
+  it('refuses more than 20 entity filters with an error saying so', async () => {
+    embedAs([1, 0]);
+
+    const ids = (count: number) => Array.from({ length: count }, (_, index) => `entity-${index}`);
+
+    const accepted = await search('crashes', { filters: { excludeEntities: ids(20) } });
+
+    expect(accepted.body.errors).toBeUndefined();
+    expect(interpretationOf(accepted).warnings).toHaveLength(20);
+
+    const refused = await search('crashes', { filters: { excludeEntities: ids(21) } });
+
+    expect(refused.body.data).toBeNull();
+    expect(refused.body.errors).toEqual([
+      expect.objectContaining({
+        message: 'A search takes at most 20 entity filters, but 21 were given.',
+        extensions: expect.objectContaining({ code: 'BAD_USER_INPUT' }),
+      }),
+    ]);
+    expect(embedded).toEqual(['crashes']);
   });
 });

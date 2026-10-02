@@ -17,6 +17,8 @@ export interface IncidentFacts extends Vocabulary {
   incidentIds: ReadonlySet<number>;
   /** Incidents in which any of the entities occurs in any of the roles. */
   incidentsWith: (entityIds: readonly string[], roles: readonly EntityRole[]) => Set<number>;
+  /** The entity's name, or undefined when no entity with a usable name has that id. */
+  nameOf: (entityId: string) => string | undefined;
 }
 
 const containsSequence = (words: readonly string[], sequence: readonly string[]) => {
@@ -138,5 +140,7 @@ export const loadIncidentFacts = async (client: MongoClient): Promise<IncidentFa
     return found;
   };
 
-  return { incidentIds, incidentsWith, resolve, longestNameWords };
+  const nameOf = (entityId: string) => names.get(entityId);
+
+  return { incidentIds, incidentsWith, nameOf, resolve, longestNameWords };
 };

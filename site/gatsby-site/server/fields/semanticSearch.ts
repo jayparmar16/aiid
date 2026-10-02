@@ -2,8 +2,10 @@ import * as Sentry from '@sentry/aws-serverless';
 import { Binary } from 'mongodb';
 import {
   GraphQLEnumType,
+  GraphQLError,
   GraphQLFieldConfigMap,
   GraphQLFloat,
+  GraphQLInputObjectType,
   GraphQLInt,
   GraphQLList,
   GraphQLNonNull,
@@ -17,11 +19,18 @@ import {
 } from '../../src/utils/embeddings/provider';
 import { Context, DBIncident } from '../interfaces';
 import { IncidentFacts, loadIncidentFacts } from '../semanticSearch/incidentFacts';
-import { parseQuery } from '../semanticSearch/parseQuery';
+import {
+  Constraint,
+  InterpretationWarning,
+  parseQuery,
+  RESPONSIBLE_ROLES,
+  toWords,
+} from '../semanticSearch/parseQuery';
 import { IncidentType } from '../types/incidents';
 
 const EMBEDDING_SCHEMA_VERSION = 2;
 const MAX_QUERY_CHARS = 500;
+const MAX_ENTITY_FILTERS = 20;
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
 const MIN_SCORE = 0.15;
@@ -97,13 +106,17 @@ const SemanticSearchConstraintType = new GraphQLObjectType({
       type: new GraphQLNonNull(
         new GraphQLEnumType({
           name: 'SemanticSearchConstraintSource',
-          values: { QUERY_TEXT: { description: 'Read from the query text.' } },
+          values: {
+            QUERY_TEXT: { description: 'Read from the query text.' },
+            EXPLICIT_FILTER: { description: 'Passed in the filters argument.' },
+          },
         })
       ),
     },
     matchedText: {
       type: GraphQLString,
-      description: 'The words in the query that named what the constraint covers.',
+      description:
+        "The words in the query that named what the constraint covers or, for an explicit filter, the filtered entity's name.",
     },
     entities: {
       type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(SemanticSearchEntityType))),
@@ -127,13 +140,29 @@ const SemanticSearchWarningType = new GraphQLObjectType({
               description:
                 'The words after an exclusion are not a known organisation or system, so nothing was excluded. The words were not searched for either.',
             },
+            UNKNOWN_ENTITY: {
+              description:
+                'An entity id in the filters is unknown, or its entity is never an alleged deployer, developer or implicated system, so that filter was not applied.',
+            },
           },
         })
       ),
     },
     text: {
       type: new GraphQLNonNull(GraphQLString),
-      description: 'The words concerned, as written.',
+      description: 'The words or entity id concerned, as given.',
+    },
+  },
+});
+
+const SemanticSearchFiltersInput = new GraphQLInputObjectType({
+  name: 'SemanticSearchFilters',
+  description: `Constraints passed directly instead of written in the query. They merge with the constraints read from the query text. A search takes at most ${MAX_ENTITY_FILTERS} entity filters.`,
+  fields: {
+    excludeEntities: {
+      type: new GraphQLList(new GraphQLNonNull(GraphQLString)),
+      description:
+        'Entity ids to exclude. Each works as if its name had been written after "excluding", so it also covers entities named after it, and it removes incidents in which they are the alleged deployer, developer or implicated system.',
     },
   },
 });
@@ -420,12 +449,69 @@ const plainInterpretation = (query: string) => ({
   warnings: [],
 });
 
+interface SemanticSearchFilters {
+  excludeEntities?: string[] | null;
+}
+
 /**
- * Reads the query's constraints and works out which incidents they leave. `allowedIncidentIds` is
- * undefined when nothing constrains the search, so an unconstrained search ranks exactly as before.
+ * Reads each excluded entity id as if the entity's own name had been typed after "excluding", so
+ * an explicit exclusion covers exactly the entities a typed one would.
  */
-const interpret = (query: string, facts: IncidentFacts) => {
-  const { semanticText, constraints, warnings } = parseQuery(query, facts);
+const explicitExclusions = (entityIds: readonly string[], facts: IncidentFacts) => {
+  const constraints: Constraint[] = [];
+  const warnings: InterpretationWarning[] = [];
+
+  for (const entityId of new Set(entityIds)) {
+    const name = facts.nameOf(entityId);
+    const entities = name ? facts.resolve(toWords(name), RESPONSIBLE_ROLES) : [];
+
+    if (name && entities.length > 0) {
+      constraints.push({
+        kind: 'EXCLUDE_ENTITY',
+        source: 'EXPLICIT_FILTER',
+        matchedText: name,
+        roles: RESPONSIBLE_ROLES,
+        entities,
+      });
+    } else {
+      warnings.push({ code: 'UNKNOWN_ENTITY', text: entityId });
+    }
+  }
+
+  return { constraints, warnings };
+};
+
+/**
+ * Keeps the first of any constraints that cover the same entities in the same way, so a page that
+ * sends back the constraints it holds never gets one twice when the user types it again.
+ */
+const withoutRepeats = (constraints: Constraint[]) => {
+  const seen = new Set<string>();
+
+  return constraints.filter(({ kind, roles, entities }) => {
+    const key = JSON.stringify([kind, roles, entities.map((entity) => entity.entityId).sort()]);
+
+    if (seen.has(key)) return false;
+
+    seen.add(key);
+    return true;
+  });
+};
+
+/**
+ * Reads the query's constraints, merges them with the explicit filters and works out which
+ * incidents they leave. `allowedIncidentIds` is undefined when nothing constrains the search, so an
+ * unconstrained search ranks exactly as before.
+ */
+const interpret = (query: string, facts: IncidentFacts, filters: SemanticSearchFilters) => {
+  const parsed = parseQuery(query, facts);
+  const explicit = explicitExclusions(filters.excludeEntities ?? [], facts);
+  const { semanticText } = parsed;
+
+  // Explicit filters come first, so the constraints a page sends back keep their order and newly
+  // typed ones follow them.
+  const constraints = withoutRepeats([...explicit.constraints, ...parsed.constraints]);
+  const warnings = [...explicit.warnings, ...parsed.warnings];
 
   const applied = constraints.map((constraint) => ({
     constraint,
@@ -466,8 +552,12 @@ export const queryFields: GraphQLFieldConfigMap<any, Context> = {
     type: new GraphQLNonNull(SemanticSearchResponseType),
     description: 'Incidents ranked by their semantic similarity to a free-text query.',
     args: {
-      query: { type: new GraphQLNonNull(GraphQLString) },
+      query: {
+        type: new GraphQLNonNull(GraphQLString),
+        description: 'May be empty when filters are given.',
+      },
       limit: { type: GraphQLInt, defaultValue: DEFAULT_LIMIT },
+      filters: { type: SemanticSearchFiltersInput },
     },
     resolve: async (_source, args, context) => {
       const query = String(args.query).trim().slice(0, MAX_QUERY_CHARS);
@@ -475,8 +565,22 @@ export const queryFields: GraphQLFieldConfigMap<any, Context> = {
         Math.max(Math.trunc(Number(args.limit) || DEFAULT_LIMIT), 1),
         MAX_LIMIT
       );
+      const filters: SemanticSearchFilters = args.filters ?? {};
+      const entityFilterCount = filters.excludeEntities?.length ?? 0;
 
-      if (!query) return { status: 'OK', results: [], interpretation: plainInterpretation(query) };
+      // Each entity filter costs a name expansion and an incident lookup, so their number is capped.
+      // The error is returned, not thrown: in production the permissions layer replaces thrown
+      // errors with a generic "not authorised", which would hide what the caller needs to fix.
+      if (entityFilterCount > MAX_ENTITY_FILTERS) {
+        return new GraphQLError(
+          `A search takes at most ${MAX_ENTITY_FILTERS} entity filters, but ${entityFilterCount} were given.`,
+          { extensions: { code: 'BAD_USER_INPUT' } }
+        );
+      }
+
+      if (!query && entityFilterCount === 0) {
+        return { status: 'OK', results: [], interpretation: plainInterpretation(query) };
+      }
 
       let facts: IncidentFacts;
 
@@ -489,7 +593,7 @@ export const queryFields: GraphQLFieldConfigMap<any, Context> = {
 
       // Only the semantic text is embedded. It is settled here, before any embedding request,
       // so a search with nothing to embed never spends one and excluded words are never sent.
-      const { interpretation, allowedIncidentIds } = interpret(query, facts);
+      const { interpretation, allowedIncidentIds } = interpret(query, facts, filters);
       const { semanticText } = interpretation;
 
       if (!semanticText) return { status: 'OK', results: [], interpretation };
