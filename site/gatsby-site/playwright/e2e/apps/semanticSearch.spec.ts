@@ -254,4 +254,52 @@ test.describe('Semantic Search', () => {
     await expect(page.locator('[data-cy="row"]')).toHaveCount(2);
     await expect(interpretation).toHaveCount(0);
   });
+
+  test('marks the entities an exclusion covers through a link', async ({ page, login }) => {
+    await login({ customData: { roles: ['subscriber'] } });
+
+    const excludingMeta = {
+      semanticText: 'social media harms',
+      constraints: [
+        {
+          kind: 'EXCLUDE_ENTITY',
+          matchedText: 'meta',
+          incidentCount: 97,
+          entities: [
+            { entity_id: 'meta', name: 'Meta', matchedBy: 'NAME' },
+            { entity_id: 'meta-ai', name: 'Meta AI', matchedBy: 'FAMILY' },
+            { entity_id: 'facebook', name: 'Facebook', matchedBy: 'LINK' },
+          ],
+        },
+      ],
+      warnings: [],
+    };
+
+    await page.route('**/graphql', async (route) => {
+      const request = route.request().postDataJSON();
+
+      if (request.operationName !== 'SemanticSearch') {
+        await route.continue();
+        return;
+      }
+
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(response('OK', results.slice(0, 2), excludingMeta)),
+      });
+    });
+
+    await page.goto(url);
+
+    const input = page.locator('[data-cy="semantic-search-input"]');
+    const exclusion = page.locator('[data-cy="semantic-search-exclusion"]');
+
+    await input.fill('social media harms excluding meta');
+    await page.locator('[data-cy="semantic-search-submit"]').click();
+
+    await expect(exclusion).toContainText('Excluding: Meta');
+    await expect(exclusion).toContainText('3 entities · 97 incidents');
+    await expect(exclusion).toHaveAttribute('title', 'Meta, Meta AI, Facebook (linked)');
+  });
 });
