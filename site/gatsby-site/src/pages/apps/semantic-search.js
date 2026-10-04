@@ -191,7 +191,12 @@ export default function SemanticSearchPage() {
           <>
             <div className="flex items-center justify-between mb-2">
               <span data-cy="semantic-search-count">
-                {t('{{count}} matching incidents', { count: results.length })}
+                {response.totalCount > results.length
+                  ? t('Showing {{shown}} of {{total}}', {
+                      shown: results.length,
+                      total: response.totalCount,
+                    })
+                  : t('{{count}} matching incidents', { count: results.length })}
               </span>
               <ExcelExport
                 results={results}

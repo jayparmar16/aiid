@@ -55,7 +55,10 @@ export interface InterpretationWarning {
 }
 
 export interface Interpretation {
-  /** What is left to rank by meaning. Equal to the query when no constraint was read. */
+  /**
+   * What is left to rank by meaning. Equal to the query when no constraint was read, and empty
+   * when only filler words are left.
+   */
   semanticText: string;
   constraints: Constraint[];
   warnings: InterpretationWarning[];
@@ -153,6 +156,39 @@ export const readExcludedName = (name: string, vocabulary: Vocabulary): Resolved
 
   return words.length > 0 ? readName(words, vocabulary, true) : [];
 };
+
+/**
+ * Words that say what is being searched for without describing it, like the "incidents" in
+ * "incidents excluding tesla". "involving AI" is one phrase, since every incident involves AI.
+ */
+const FILLER = ['incidents', 'incident', 'cases', 'related', 'involving ai'].map((phrase) =>
+  phrase.split(' ')
+);
+
+const isOnlyFiller = (text: string) => {
+  const words = toWords(text);
+  let index = 0;
+
+  while (index < words.length) {
+    const filler = FILLER.find((phrase) =>
+      phrase.every((word, offset) => words[index + offset] === word)
+    );
+
+    if (filler) index += filler.length;
+    else if (ARTICLES.has(words[index])) index++;
+    else return false;
+  }
+
+  return true;
+};
+
+/**
+ * What is left to rank by meaning once constraints have been taken out of a query: nothing when
+ * only filler words remain, so a search made only of constraints lists its matches instead of
+ * ranking them against a word like "incidents". Anything meaningful is kept exactly as written,
+ * filler included.
+ */
+export const meaningLeftIn = (text: string) => (isOnlyFiller(text) ? '' : text);
 
 /** Collapses the gaps and stray separators left where constraint phrases were cut out. */
 const tidy = (text: string) =>
@@ -334,5 +370,9 @@ export const parseQuery = (query: string, vocabulary: Vocabulary): Interpretatio
     cursor = end;
   }
 
-  return { semanticText: tidy(semanticText + query.slice(cursor)), constraints, warnings };
+  return {
+    semanticText: meaningLeftIn(tidy(semanticText + query.slice(cursor))),
+    constraints,
+    warnings,
+  };
 };

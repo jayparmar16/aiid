@@ -19,6 +19,8 @@ export interface IncidentFacts extends Vocabulary {
   incidentsWith: (entityIds: readonly string[], roles: readonly EntityRole[]) => Set<number>;
   /** The entity's name, or undefined when no entity with a usable name has that id. */
   nameOf: (entityId: string) => string | undefined;
+  /** The incident's date as `YYYY-MM-DD`, or an empty string when it has none. */
+  dateOf: (incidentId: number) => string;
 }
 
 const containsSequence = (words: readonly string[], sequence: readonly string[]) => {
@@ -49,7 +51,7 @@ export const loadIncidentFacts = async (client: MongoClient): Promise<IncidentFa
       .toArray(),
     db
       .collection('incidents')
-      .find({}, { projection: { _id: 0, incident_id: 1, ...roleProjection } })
+      .find({}, { projection: { _id: 0, incident_id: 1, date: 1, ...roleProjection } })
       .toArray(),
     db
       .collection('entity_relationships')
@@ -58,12 +60,14 @@ export const loadIncidentFacts = async (client: MongoClient): Promise<IncidentFa
   ]);
 
   const incidentIds = new Set<number>();
+  const dates = new Map<number, string>();
   const incidentsByRole = new Map<EntityRole, Map<string, Set<number>>>(
     RESPONSIBLE_ROLES.map((role) => [role, new Map()])
   );
 
   for (const incident of incidents) {
     incidentIds.add(incident.incident_id);
+    if (typeof incident.date === 'string') dates.set(incident.incident_id, incident.date);
 
     for (const role of RESPONSIBLE_ROLES) {
       const entityIds = incident[ROLE_FIELDS[role]];
@@ -176,5 +180,7 @@ export const loadIncidentFacts = async (client: MongoClient): Promise<IncidentFa
 
   const nameOf = (entityId: string) => names.get(entityId);
 
-  return { incidentIds, incidentsWith, nameOf, resolve, longestNameWords };
+  const dateOf = (incidentId: number) => dates.get(incidentId) ?? '';
+
+  return { incidentIds, incidentsWith, nameOf, dateOf, resolve, longestNameWords };
 };
