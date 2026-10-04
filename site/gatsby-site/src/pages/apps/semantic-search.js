@@ -8,6 +8,7 @@ import SemanticSearchTable from '../../components/semanticSearch/SemanticSearchT
 import ExcelExport from '../../components/semanticSearch/ExcelExport';
 import SearchInterpretation from '../../components/semanticSearch/SearchInterpretation';
 import OrganisationFilter from '../../components/semanticSearch/OrganisationFilter';
+import DateRangeFilter from '../../components/semanticSearch/DateRangeFilter';
 import { SEMANTIC_SEARCH } from '../../graphql/semanticSearch';
 
 const exampleQueries = [
@@ -16,14 +17,22 @@ const exampleQueries = [
   'autonomous vehicle crashes involving pedestrians',
 ];
 
+// A date range chip is held by its bounds, either of which may be null.
+const isDateChip = ({ filter }) => 'dateFrom' in filter;
+
 /**
  * Sends each chip's filter back with the next search. A typed exclusion is held by the words that
  * named it, which the search reads again exactly as typed, so it keeps every entity it covered.
  */
-const filtersFor = (chips) => ({
-  excludeEntities: chips.flatMap(({ filter }) => (filter.id ? [filter.id] : [])),
-  excludeNames: chips.flatMap(({ filter }) => (filter.name ? [filter.name] : [])),
-});
+const filtersFor = (chips) => {
+  const dateChip = chips.find(isDateChip);
+
+  return {
+    excludeEntities: chips.flatMap(({ filter }) => (filter.id ? [filter.id] : [])),
+    excludeNames: chips.flatMap(({ filter }) => (filter.name ? [filter.name] : [])),
+    ...(dateChip && { dateFrom: dateChip.filter.dateFrom, dateTo: dateChip.filter.dateTo }),
+  };
+};
 
 /**
  * Pairs each exclusion a search applied with the filter that brings it back. An explicit one
@@ -32,15 +41,19 @@ const filtersFor = (chips) => ({
  * by their matched text.
  */
 const chipsFrom = (constraints, held) => {
-  const explicit = constraints.filter((constraint) => constraint.source === 'EXPLICIT_FILTER');
+  const explicit = constraints.filter(
+    (constraint) => constraint.source === 'EXPLICIT_FILTER' && constraint.kind !== 'DATE_RANGE'
+  );
 
-  const kept = held.flatMap(({ filter }) => {
-    const index = explicit.findIndex(
-      (constraint) => constraint.matchedText === (filter.name ?? filter.id)
-    );
+  const kept = held
+    .filter((chip) => !isDateChip(chip))
+    .flatMap(({ filter }) => {
+      const index = explicit.findIndex(
+        (constraint) => constraint.matchedText === (filter.name ?? filter.id)
+      );
 
-    return index < 0 ? [] : [{ filter, constraint: explicit.splice(index, 1)[0] }];
-  });
+      return index < 0 ? [] : [{ filter, constraint: explicit.splice(index, 1)[0] }];
+    });
 
   const typed = constraints
     .filter(
@@ -48,7 +61,16 @@ const chipsFrom = (constraints, held) => {
     )
     .map((constraint) => ({ filter: { name: constraint.matchedText }, constraint }));
 
-  return [...kept, ...typed];
+  // A search has at most one date range, since a typed one replaces the one held, and its bounds
+  // bring it back exactly.
+  const dates = constraints
+    .filter((constraint) => constraint.kind === 'DATE_RANGE')
+    .map((constraint) => ({
+      filter: { dateFrom: constraint.dateFrom, dateTo: constraint.dateTo },
+      constraint,
+    }));
+
+  return [...kept, ...typed, ...dates];
 };
 
 /**
@@ -112,8 +134,12 @@ export default function SemanticSearchPage() {
     runSearch(input, remaining);
   };
 
-  // A chip picked from the organisation control has no constraint until its search returns.
+  // A chip picked from a control has no constraint until its search returns.
   const constraints = chips.flatMap((chip) => (chip.constraint ? [chip.constraint] : []));
+
+  const dateChips = chips.filter(isDateChip);
+
+  const entityChips = chips.filter((chip) => !isDateChip(chip));
 
   return (
     <div className="w-full">
@@ -162,9 +188,17 @@ export default function SemanticSearchPage() {
         </form>
 
         <OrganisationFilter
-          chips={chips}
+          chips={entityChips}
           disabled={loading}
-          onChange={(next) => runSearch(input, next)}
+          onChange={(next) => runSearch(input, [...next, ...dateChips])}
+        />
+
+        <DateRangeFilter
+          range={dateChips[0]?.filter}
+          disabled={loading}
+          onChange={(range) =>
+            runSearch(input, [...entityChips, ...(range ? [{ filter: range }] : [])])
+          }
         />
 
         {loading && <Spinner />}

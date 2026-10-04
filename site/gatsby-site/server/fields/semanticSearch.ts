@@ -106,6 +106,10 @@ const SemanticSearchConstraintType = new GraphQLObjectType({
               description:
                 'Removes incidents in which a covered entity is the alleged deployer, developer or implicated system.',
             },
+            DATE_RANGE: {
+              description:
+                'Keeps incidents dated from `dateFrom` to `dateTo`, both inclusive. Incidents without a date are left out.',
+            },
           },
         })
       ),
@@ -124,10 +128,21 @@ const SemanticSearchConstraintType = new GraphQLObjectType({
     matchedText: {
       type: GraphQLString,
       description:
-        'The words in the query that named what the constraint covers or, for an explicit filter, the name or entity id exactly as given, so a caller can tell which filter it came from.',
+        'The words in the query that named what the constraint covers or, for an explicit filter, the name or entity id exactly as given, so a caller can tell which filter it came from. Null for an explicit date range, whose bounds are its own fields.',
     },
     entities: {
       type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(SemanticSearchEntityType))),
+      description: 'Empty for a date range.',
+    },
+    dateFrom: {
+      type: GraphQLString,
+      description:
+        'For a date range, the first incident date it keeps, as YYYY-MM-DD. Null when the range has no start.',
+    },
+    dateTo: {
+      type: GraphQLString,
+      description:
+        'For a date range, the last incident date it keeps, as YYYY-MM-DD. Null when the range has no end.',
     },
     incidentCount: {
       type: new GraphQLNonNull(GraphQLInt),
@@ -151,6 +166,10 @@ const SemanticSearchWarningType = new GraphQLObjectType({
             UNKNOWN_ENTITY: {
               description:
                 'An entity id in the filters is unknown, or its entity is never an alleged deployer, developer or implicated system, so that filter was not applied.',
+            },
+            INVALID_DATE: {
+              description:
+                'A date in the filters is not a real day written as YYYY-MM-DD, so that bound was not applied.',
             },
           },
         })
@@ -176,6 +195,16 @@ const SemanticSearchFiltersInput = new GraphQLInputObjectType({
       type: new GraphQLList(new GraphQLNonNull(GraphQLString)),
       description:
         'Names to exclude, each read exactly as if it had been written after "excluding", including the first words of a name ("clearview" for "Clearview AI"). The whole text must be one name. Sending back the matched text of a constraint read from an earlier query applies the same constraint again.',
+    },
+    dateFrom: {
+      type: GraphQLString,
+      description:
+        'Keeps incidents dated on or after this day, written as YYYY-MM-DD. A date phrase in the query replaces both date bounds. Date bounds do not count towards the entity filter limit.',
+    },
+    dateTo: {
+      type: GraphQLString,
+      description:
+        'Keeps incidents dated on or before this day, written as YYYY-MM-DD. A date phrase in the query replaces both date bounds.',
     },
   },
 });
@@ -233,6 +262,14 @@ const SemanticSearchFacetsType = new GraphQLObjectType({
       description:
         'Every entity that is the alleged deployer, developer or implicated system of an incident, ordered by name. Any of their ids can be passed in `excludeEntities`.',
     },
+    earliestDate: {
+      type: GraphQLString,
+      description: 'The earliest incident date, as YYYY-MM-DD. Null when no incident has a date.',
+    },
+    latestDate: {
+      type: GraphQLString,
+      description: 'The latest incident date, as YYYY-MM-DD. Null when no incident has a date.',
+    },
   },
 });
 
@@ -276,6 +313,12 @@ const cachedVectors = createWarmCache<CachedIncidentVectors[]>((incidents) => in
 // Not keyed by the embedding model: the query is parsed before anything is embedded.
 const cachedFacts = createWarmCache<IncidentFacts>();
 const FACTS_CACHE_KEY = 'incident-facts';
+
+/**
+ * Where searches read the current time, which "this year" and "past 3 years" count from. Tests
+ * replace `now` to fix the clock without faking the timers the database driver relies on.
+ */
+export const semanticSearchClock = { now: () => new Date() };
 
 /** Converts BSON Float32 vector data to a unit vector, rejecting malformed values. */
 export const normaliseBinaryVector = (value: unknown, dimensions: number): Float32Array | null => {
@@ -551,7 +594,50 @@ const plainInterpretation = (query: string) => ({
 interface SemanticSearchFilters {
   excludeEntities?: string[] | null;
   excludeNames?: string[] | null;
+  dateFrom?: string | null;
+  dateTo?: string | null;
 }
+
+/** Whether the text is a real calendar day written as YYYY-MM-DD, so "2023-02-30" is refused. */
+const isIsoDay = (text: string) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return false;
+
+  const date = new Date(`${text}T00:00:00Z`);
+
+  return !Number.isNaN(date.getTime()) && date.toISOString().startsWith(text);
+};
+
+/**
+ * The explicit date range, keeping each valid bound on its own and reporting each invalid one, or
+ * no constraint when neither bound applies.
+ */
+const explicitDateRange = (filters: SemanticSearchFilters) => {
+  const constraints: Constraint[] = [];
+  const warnings: InterpretationWarning[] = [];
+
+  const bound = (value: string | null | undefined) => {
+    if (value == null || value === '') return null;
+    if (isIsoDay(value)) return value;
+
+    warnings.push({ code: 'INVALID_DATE', text: value });
+    return null;
+  };
+
+  const dateFrom = bound(filters.dateFrom);
+  const dateTo = bound(filters.dateTo);
+
+  if (dateFrom || dateTo) {
+    constraints.push({
+      kind: 'DATE_RANGE',
+      source: 'EXPLICIT_FILTER',
+      matchedText: null,
+      dateFrom,
+      dateTo,
+    });
+  }
+
+  return { constraints, warnings };
+};
 
 /**
  * Reads each excluded entity id as if the entity's whole name had been typed after "excluding",
@@ -597,7 +683,11 @@ const explicitExclusions = (filters: SemanticSearchFilters, facts: IncidentFacts
 const withoutRepeats = (constraints: Constraint[]) => {
   const seen = new Set<string>();
 
-  return constraints.filter(({ kind, roles, entities }) => {
+  return constraints.filter((constraint) => {
+    // A search has at most one date range, so only entity constraints can repeat.
+    if (!('entities' in constraint)) return true;
+
+    const { kind, roles, entities } = constraint;
     const key = JSON.stringify([kind, roles, entities.map((entity) => entity.entityId).sort()]);
 
     if (seen.has(key)) return false;
@@ -612,34 +702,89 @@ const withoutRepeats = (constraints: Constraint[]) => {
  * incidents they leave. `allowedIncidentIds` is undefined when nothing constrains the search, so an
  * unconstrained search ranks exactly as before.
  */
-const interpret = (query: string, facts: IncidentFacts, filters: SemanticSearchFilters) => {
-  const parsed = parseQuery(query, facts);
+/** The incidents a constraint applies to: those it removes or, for any other kind, those it keeps. */
+const incidentsFor = (constraint: Constraint, facts: IncidentFacts) =>
+  constraint.kind === 'DATE_RANGE'
+    ? facts.incidentsDated(constraint.dateFrom, constraint.dateTo)
+    : facts.incidentsWith(
+        constraint.entities.map((entity) => entity.entityId),
+        constraint.roles
+      );
+
+/**
+ * What a constraint that keeps incidents is combined by. Constraints with the same key widen each
+ * other and constraints with different keys narrow each other.
+ */
+const requirementKey = (constraint: Constraint) =>
+  constraint.kind === 'DATE_RANGE' ? 'date' : constraint.kind;
+
+/**
+ * The incidents left once every constraint applies: in each group of required incidents, then
+ * without any excluded one.
+ */
+const allowedBy = (
+  applied: { constraint: Constraint; incidents: Set<number> }[],
+  facts: IncidentFacts
+) => {
+  const required = new Map<string, Set<number>>();
+  const excluded = new Set<number>();
+
+  for (const { constraint, incidents } of applied) {
+    if (constraint.kind === 'EXCLUDE_ENTITY') {
+      for (const incidentId of incidents) excluded.add(incidentId);
+      continue;
+    }
+
+    const key = requirementKey(constraint);
+    const group = required.get(key) ?? new Set<number>();
+
+    for (const incidentId of incidents) group.add(incidentId);
+    required.set(key, group);
+  }
+
+  const groups = Array.from(required.values());
+
+  return new Set(
+    Array.from(facts.incidentIds).filter(
+      (incidentId) => !excluded.has(incidentId) && groups.every((group) => group.has(incidentId))
+    )
+  );
+};
+
+const interpret = (
+  query: string,
+  facts: IncidentFacts,
+  filters: SemanticSearchFilters,
+  now: Date
+) => {
+  const parsed = parseQuery(query, facts, now);
   const explicit = explicitExclusions(filters, facts);
+
+  // A date typed in the query is the latest instruction, so it replaces the explicit range, and
+  // any problem with that range no longer matters.
+  const typedDate = parsed.constraints.some((constraint) => constraint.kind === 'DATE_RANGE');
+  const explicitDate = typedDate ? { constraints: [], warnings: [] } : explicitDateRange(filters);
 
   // Explicit filters come first, so the constraints a page sends back keep their order and newly
   // typed ones follow them.
-  const constraints = withoutRepeats([...explicit.constraints, ...parsed.constraints]);
-  const warnings = [...explicit.warnings, ...parsed.warnings];
+  const constraints = withoutRepeats([
+    ...explicit.constraints,
+    ...explicitDate.constraints,
+    ...parsed.constraints,
+  ]);
+  const warnings = [...explicit.warnings, ...explicitDate.warnings, ...parsed.warnings];
 
   const applied = constraints.map((constraint) => ({
     constraint,
-    incidents: facts.incidentsWith(
-      constraint.entities.map((entity) => entity.entityId),
-      constraint.roles
-    ),
+    incidents: incidentsFor(constraint, facts),
   }));
-
-  const excluded = new Set(applied.flatMap(({ incidents }) => Array.from(incidents)));
 
   // Explicit filters are constraints taken out of the query too, so a query of filler words sent
   // with them leaves nothing to rank by meaning. Without constraints it is ranked as written.
   const semanticText =
     applied.length > 0 ? meaningLeftIn(parsed.semanticText) : parsed.semanticText;
 
-  const allowedIncidentIds =
-    applied.length > 0
-      ? new Set(Array.from(facts.incidentIds).filter((incidentId) => !excluded.has(incidentId)))
-      : undefined;
+  const allowedIncidentIds = applied.length > 0 ? allowedBy(applied, facts) : undefined;
 
   const interpretation = {
     semanticText,
@@ -648,11 +793,16 @@ const interpret = (query: string, facts: IncidentFacts, filters: SemanticSearchF
       kind: constraint.kind,
       source: constraint.source,
       matchedText: constraint.matchedText,
-      entities: constraint.entities.map(({ entityId, name, matchedBy }) => ({
-        entity_id: entityId,
-        name,
-        matchedBy,
-      })),
+      entities:
+        'entities' in constraint
+          ? constraint.entities.map(({ entityId, name, matchedBy }) => ({
+              entity_id: entityId,
+              name,
+              matchedBy,
+            }))
+          : [],
+      dateFrom: 'dateFrom' in constraint ? constraint.dateFrom : null,
+      dateTo: 'dateTo' in constraint ? constraint.dateTo : null,
       incidentCount: incidents.size,
     })),
   };
@@ -692,7 +842,9 @@ export const queryFields: GraphQLFieldConfigMap<any, Context> = {
         );
       }
 
-      if (!query && entityFilterCount === 0) {
+      const hasDateFilter = Boolean(filters.dateFrom || filters.dateTo);
+
+      if (!query && entityFilterCount === 0 && !hasDateFilter) {
         return { ...noResults('OK'), interpretation: plainInterpretation(query) };
       }
 
@@ -707,7 +859,12 @@ export const queryFields: GraphQLFieldConfigMap<any, Context> = {
 
       // Only the semantic text is embedded. It is settled here, before any embedding request,
       // so a search with nothing to embed never spends one and excluded words are never sent.
-      const { interpretation, allowedIncidentIds } = interpret(query, facts, filters);
+      const { interpretation, allowedIncidentIds } = interpret(
+        query,
+        facts,
+        filters,
+        semanticSearchClock.now()
+      );
       const { semanticText } = interpretation;
 
       if (!semanticText) {
@@ -735,6 +892,8 @@ export const queryFields: GraphQLFieldConfigMap<any, Context> = {
             entity_id: entityId,
             name,
           })),
+          earliestDate: facts.dateSpan?.earliest ?? null,
+          latestDate: facts.dateSpan?.latest ?? null,
         };
       } catch (error) {
         Sentry.captureException(error);

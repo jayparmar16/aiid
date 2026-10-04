@@ -9,13 +9,29 @@ const url = '/apps/semantic-search/';
 // The API returns an interpretation with every status. A query without constraints has nothing in it.
 const unconstrained = { semanticText: '', constraints: [], warnings: [] };
 
+// Fields only some kinds of constraint carry, which the server sends as null on every other kind.
+const constraintDefaults = { dateFrom: null, dateTo: null };
+
 const response = (
   status: string,
   results: unknown[] = [],
-  interpretation: unknown = unconstrained,
+  interpretation: any = unconstrained,
   totalCount = results.length
 ) => ({
-  data: { semanticSearch: { status, totalCount, results, interpretation } },
+  data: {
+    semanticSearch: {
+      status,
+      totalCount,
+      results,
+      interpretation: {
+        ...interpretation,
+        constraints: interpretation.constraints.map((constraint: object) => ({
+          ...constraintDefaults,
+          ...constraint,
+        })),
+      },
+    },
+  },
 });
 
 const results = Array.from({ length: 30 }, (_, index) => ({
@@ -556,6 +572,8 @@ test.describe('Semantic Search', () => {
             { entity_id: 'uber', name: 'Uber' },
             { entity_id: 'waymo', name: 'Waymo' },
           ],
+          earliestDate: '1983-01-01',
+          latestDate: '2026-09-30',
         },
       },
     };
@@ -776,5 +794,150 @@ test.describe('Semantic Search', () => {
     const workbook = readWorkbook(await readFile((await (await xlsxDownloadPromise).path())!));
 
     expect(workbook.Results[1].slice(0, 2)).toEqual(['', '7']);
+  });
+
+  test('limits a search to a period typed in the query or set in the date control', async ({
+    page,
+    login,
+  }) => {
+    await login({ customData: { roles: ['subscriber'] } });
+
+    const facets = {
+      data: {
+        semanticSearchFacets: {
+          responsibleEntities: [],
+          earliestDate: '1983-09-26',
+          latestDate: '2026-09-30',
+        },
+      },
+    };
+
+    const dateRange = (
+      source: string,
+      matchedText: string | null,
+      dateFrom: string | null,
+      dateTo: string | null,
+      incidentCount: number
+    ) => ({
+      kind: 'DATE_RANGE',
+      source,
+      matchedText,
+      dateFrom,
+      dateTo,
+      incidentCount,
+      entities: [],
+    });
+
+    const readAs = (constraints: unknown[]) => ({
+      semanticText: 'deepfakes',
+      constraints,
+      warnings: [],
+    });
+
+    // The reply to each search in turn. A date typed in the query replaces the range sent with it.
+    const replies = [
+      readAs([dateRange('QUERY_TEXT', 'since 2020', '2020-01-01', null, 120)]),
+      readAs([dateRange('EXPLICIT_FILTER', null, '2020-01-01', '2022-12-31', 70)]),
+      readAs([dateRange('QUERY_TEXT', 'in 2019', '2019-01-01', '2019-12-31', 25)]),
+      readAs([]),
+    ];
+    const requests: unknown[] = [];
+
+    await page.route('**/graphql', async (route) => {
+      const request = route.request().postDataJSON();
+
+      if (request.operationName === 'SemanticSearchFacets') {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(facets),
+        });
+        return;
+      }
+
+      if (request.operationName !== 'SemanticSearch') {
+        await route.continue();
+        return;
+      }
+
+      requests.push(request.variables);
+
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(response('OK', results.slice(0, 2), replies[requests.length - 1])),
+      });
+    });
+
+    await page.goto(url);
+
+    const input = page.locator('[data-cy="semantic-search-input"]');
+    const submit = page.locator('[data-cy="semantic-search-submit"]');
+    const chip = page.locator('[data-cy="semantic-search-date-range"]');
+    const dateFrom = page.locator('[data-cy="semantic-search-date-from"]');
+    const dateTo = page.locator('[data-cy="semantic-search-date-to"]');
+    const apply = page.locator('[data-cy="semantic-search-apply-dates"]');
+
+    // The control offers only the days incidents span.
+    await expect(dateFrom).toHaveAttribute('min', '1983-09-26');
+    await expect(dateTo).toHaveAttribute('max', '2026-09-30');
+
+    await input.fill('deepfakes since 2020');
+    await submit.click();
+
+    // A typed date becomes a chip and fills the control, and leaves the box.
+    await expect(chip).toHaveCount(1);
+    await expect(chip).toContainText('Since 2020');
+    await expect(chip).toContainText('120 incidents');
+    await expect(input).toHaveValue('deepfakes');
+    await expect(dateFrom).toHaveValue('2020-01-01');
+    await expect(dateTo).toHaveValue('');
+    await expect(apply).toBeDisabled();
+
+    await dateTo.fill('2022-12-31');
+    await apply.click();
+
+    await expect(chip).toContainText('2020–2022');
+    await expect(chip).toContainText('70 incidents');
+
+    await input.fill('deepfakes in 2019');
+    await submit.click();
+
+    await expect(chip).toHaveCount(1);
+    await expect(chip).toContainText('In 2019');
+    await expect(dateFrom).toHaveValue('2019-01-01');
+    await expect(dateTo).toHaveValue('2019-12-31');
+
+    await chip.locator('[data-cy="semantic-search-remove-constraint"]').click();
+
+    await expect(chip).toHaveCount(0);
+    await expect(dateFrom).toHaveValue('');
+    await expect(dateTo).toHaveValue('');
+
+    // The range goes back as its bounds, search after search, and not at all once removed.
+    await expect
+      .poll(() => requests)
+      .toEqual([
+        { query: 'deepfakes since 2020', filters: { excludeEntities: [], excludeNames: [] } },
+        {
+          query: 'deepfakes',
+          filters: {
+            excludeEntities: [],
+            excludeNames: [],
+            dateFrom: '2020-01-01',
+            dateTo: '2022-12-31',
+          },
+        },
+        {
+          query: 'deepfakes in 2019',
+          filters: {
+            excludeEntities: [],
+            excludeNames: [],
+            dateFrom: '2020-01-01',
+            dateTo: '2022-12-31',
+          },
+        },
+        { query: 'deepfakes', filters: { excludeEntities: [], excludeNames: [] } },
+      ]);
   });
 });

@@ -1,9 +1,9 @@
 /**
  * Reads constraints out of a plain-English semantic search query.
  *
- * Pure: the caller supplies the vocabulary of entity names, so this module never touches the
- * network or the database. Every rule about English wording (linking words, lists, plural
- * folding) lives here and nowhere else.
+ * Pure: the caller supplies the vocabulary of entity names and the current time, so this module
+ * never touches the network, the database or the clock. Every rule about English wording (linking
+ * words, lists, plural folding, date phrases) lives here and nowhere else.
  */
 
 export type EntityRole = 'deployer' | 'developer' | 'implicated';
@@ -47,10 +47,20 @@ export interface ExcludeEntityConstraint {
   entities: ResolvedEntity[];
 }
 
-export type Constraint = ExcludeEntityConstraint;
+/** Keeps incidents dated within inclusive `YYYY-MM-DD` bounds. A missing bound is open. */
+export interface DateRangeConstraint {
+  kind: 'DATE_RANGE';
+  source: 'QUERY_TEXT' | 'EXPLICIT_FILTER';
+  /** The date phrases written in the query, or null for an explicit filter. */
+  matchedText: string | null;
+  dateFrom: string | null;
+  dateTo: string | null;
+}
+
+export type Constraint = ExcludeEntityConstraint | DateRangeConstraint;
 
 export interface InterpretationWarning {
-  code: 'UNRECOGNISED_EXCLUSION' | 'UNKNOWN_ENTITY';
+  code: 'UNRECOGNISED_EXCLUSION' | 'UNKNOWN_ENTITY' | 'INVALID_DATE';
   text: string;
 }
 
@@ -190,6 +200,108 @@ const isOnlyFiller = (text: string) => {
  */
 export const meaningLeftIn = (text: string) => (isOnlyFiller(text) ? '' : text);
 
+/** Inclusive `YYYY-MM-DD` bounds on the incident date. A null bound is open. */
+interface DateBounds {
+  dateFrom: string | null;
+  dateTo: string | null;
+}
+
+// Four digits outside this span are more likely a count or a model number than a year.
+const MIN_YEAR = 1900;
+const MAX_YEAR = 2100;
+const MAX_YEAR_COUNT = 200;
+
+const DASH = /^\s*[-–]\s*$/;
+
+const isoDay = (date: Date) => date.toISOString().slice(0, 10);
+
+const startOf = (year: number) => `${year}-01-01`;
+
+const endOf = (year: number) => `${year}-12-31`;
+
+const wholeYears = ([first, last]: number[]): DateBounds => ({
+  dateFrom: startOf(Math.min(first, last)),
+  dateTo: endOf(Math.max(first, last)),
+});
+
+/** The same day `years` earlier, or the last day of February when that year has no 29th. */
+const yearsBefore = (now: Date, years: number) => {
+  const year = now.getUTCFullYear() - years;
+  const lastDay = new Date(Date.UTC(year, now.getUTCMonth() + 1, 0)).getUTCDate();
+
+  return isoDay(new Date(Date.UTC(year, now.getUTCMonth(), Math.min(now.getUTCDate(), lastDay))));
+};
+
+/**
+ * Each slot of a date phrase is a word, with alternatives separated by "|", YEAR for a year from
+ * 1900 to 2100, COUNT for a number of years, or -YEAR for a year joined to the one before it by a
+ * dash. At one position the first phrase that matches wins, so longer phrases come first.
+ */
+const DATE_PHRASES: { slots: string[]; bounds: (numbers: number[], now: Date) => DateBounds }[] = [
+  ...[['in|during|over|within', 'the'], ['the'], ['in|during|over|within'], []].map((prefix) => ({
+    slots: [...prefix, 'past|last', 'COUNT', 'years|year'],
+    bounds: ([count]: number[], now: Date) => ({
+      dateFrom: yearsBefore(now, count),
+      dateTo: isoDay(now),
+    }),
+  })),
+  { slots: ['between', 'YEAR', 'and', 'YEAR'], bounds: wholeYears },
+  { slots: ['from', 'YEAR', 'to|until|through', 'YEAR'], bounds: wholeYears },
+  { slots: ['in|during|from|between', 'YEAR', '-YEAR'], bounds: wholeYears },
+  { slots: ['YEAR', '-YEAR'], bounds: wholeYears },
+  ...[['in|during'], []].flatMap((prefix) => [
+    {
+      slots: [...prefix, 'this', 'year'],
+      bounds: (_: number[], now: Date) => wholeYears([now.getUTCFullYear(), now.getUTCFullYear()]),
+    },
+    {
+      slots: [...prefix, 'last', 'year'],
+      bounds: (_: number[], now: Date) =>
+        wholeYears([now.getUTCFullYear() - 1, now.getUTCFullYear() - 1]),
+    },
+  ]),
+  {
+    slots: ['since|from', 'YEAR'],
+    bounds: ([year]) => ({ dateFrom: startOf(year), dateTo: null }),
+  },
+  {
+    slots: ['after', 'YEAR'],
+    bounds: ([year]) => ({ dateFrom: startOf(year + 1), dateTo: null }),
+  },
+  {
+    slots: ['before', 'YEAR'],
+    bounds: ([year]) => ({ dateFrom: null, dateTo: endOf(year - 1) }),
+  },
+  { slots: ['in|during', 'YEAR'], bounds: ([year]) => wholeYears([year, year]) },
+];
+
+const yearIn = (word: string) => {
+  const year = /^\d{4}$/.test(word) ? Number(word) : NaN;
+
+  return year >= MIN_YEAR && year <= MAX_YEAR ? year : null;
+};
+
+const countIn = (word: string) => {
+  const count = /^\d{1,3}$/.test(word) ? Number(word) : NaN;
+
+  return count >= 1 && count <= MAX_YEAR_COUNT ? count : null;
+};
+
+/**
+ * Narrows several date phrases to the dates all of them allow, so "since 2019 before 2022" reads
+ * as 2019 to 2021. Phrases that leave no date at all match nothing, which the chip makes visible.
+ */
+const intersect = (ranges: DateBounds[]): DateBounds => ({
+  dateFrom: ranges.reduce<string | null>(
+    (latest, { dateFrom }) => (dateFrom && (!latest || dateFrom > latest) ? dateFrom : latest),
+    null
+  ),
+  dateTo: ranges.reduce<string | null>(
+    (earliest, { dateTo }) => (dateTo && (!earliest || dateTo < earliest) ? dateTo : earliest),
+    null
+  ),
+});
+
 /** Collapses the gaps and stray separators left where constraint phrases were cut out. */
 const tidy = (text: string) =>
   text
@@ -198,11 +310,16 @@ const tidy = (text: string) =>
     .replace(/([,;:])\s*(?=[,.;:!?])/g, '')
     .replace(/^[\s,;:.-]+|[\s,;:-]+$/g, '');
 
-export const parseQuery = (query: string, vocabulary: Vocabulary): Interpretation => {
+/**
+ * `now` anchors "this year", "last year" and "past N years", which are counted in UTC. Several date
+ * phrases combine into one date range that every one of them allows.
+ */
+export const parseQuery = (query: string, vocabulary: Vocabulary, now: Date): Interpretation => {
   const tokens = tokenize(query);
   const constraints: Constraint[] = [];
   const warnings: InterpretationWarning[] = [];
   const removed: [number, number][] = [];
+  const dates: (DateBounds & { text: string })[] = [];
 
   const gapBefore = (index: number) =>
     index > 0 && index < tokens.length
@@ -217,6 +334,32 @@ export const parseQuery = (query: string, vocabulary: Vocabulary): Interpretatio
           (offset === 0 || !BREAK.test(gapBefore(index + offset)))
       )
     );
+
+  /** The date phrase starting at `index`, with the token after it, or null when none does. */
+  const dateAt = (index: number): (DateBounds & { end: number }) | null => {
+    for (const { slots, bounds } of DATE_PHRASES) {
+      const numbers: number[] = [];
+
+      const matches = slots.every((slot, offset) => {
+        const token = tokens[index + offset];
+        if (!token) return false;
+
+        const gap = offset > 0 ? gapBefore(index + offset) : '';
+        if (slot === '-YEAR' ? !DASH.test(gap) : BREAK.test(gap)) return false;
+
+        if (!['YEAR', '-YEAR', 'COUNT'].includes(slot)) return slot.split('|').includes(token.word);
+
+        const number = slot === 'COUNT' ? countIn(token.word) : yearIn(token.word);
+        if (number !== null) numbers.push(number);
+
+        return number !== null;
+      });
+
+      if (matches) return { end: index + slots.length, ...bounds(numbers, now) };
+    }
+
+    return null;
+  };
 
   const skipArticles = (index: number) => {
     while (index < tokens.length && ARTICLES.has(tokens[index].word)) index++;
@@ -270,9 +413,15 @@ export const parseQuery = (query: string, vocabulary: Vocabulary): Interpretatio
     return names;
   };
 
-  /** Whether a token range ending at `end` is followed by the end, punctuation or a linking word. */
+  /**
+   * Whether a token range ending at `end` is followed by the end, punctuation, a linking word or a
+   * date phrase, so "not tesla since 2020" ends its name where the date begins.
+   */
   const endsAtBreak = (end: number) =>
-    end >= tokens.length || BREAK.test(gapBefore(end)) || Boolean(phraseAt(end));
+    end >= tokens.length ||
+    BREAK.test(gapBefore(end)) ||
+    Boolean(phraseAt(end)) ||
+    Boolean(dateAt(end));
 
   /** The first token after `start` that begins a new clause, or the end of the query. */
   const clauseEnd = (start: number) => {
@@ -294,6 +443,18 @@ export const parseQuery = (query: string, vocabulary: Vocabulary): Interpretatio
 
   while (index < tokens.length) {
     const token = tokens[index];
+
+    // Read before linking words, so that "from" followed by a year is a date.
+    const date = dateAt(index);
+
+    if (date) {
+      const text = query.slice(token.start, tokens[date.end - 1].end);
+
+      dates.push({ dateFrom: date.dateFrom, dateTo: date.dateTo, text });
+      removed.push([token.start, tokens[date.end - 1].end]);
+      index = date.end;
+      continue;
+    }
 
     // "non-tesla": acts only on a known name, so "non-consensual" is left alone.
     if (token.word === 'non' && query.slice(token.end, tokens[index + 1]?.start) === '-') {
@@ -358,6 +519,15 @@ export const parseQuery = (query: string, vocabulary: Vocabulary): Interpretatio
 
     removed.push([token.start, tokens[stop - 1].end]);
     index = stop;
+  }
+
+  if (dates.length > 0) {
+    constraints.push({
+      kind: 'DATE_RANGE',
+      source: 'QUERY_TEXT',
+      matchedText: dates.map(({ text }) => text).join(', '),
+      ...intersect(dates),
+    });
   }
 
   if (removed.length === 0) return { semanticText: query, constraints, warnings };

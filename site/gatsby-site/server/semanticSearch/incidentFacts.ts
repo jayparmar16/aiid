@@ -23,7 +23,16 @@ export interface IncidentFacts extends Vocabulary {
   responsibleEntities: readonly { entityId: string; name: string }[];
   /** The incident's date as `YYYY-MM-DD`, or an empty string when it has none. */
   dateOf: (incidentId: number) => string;
+  /**
+   * Incidents dated within inclusive `YYYY-MM-DD` bounds, either of which may be null for an open
+   * end. An incident without a usable date is never in a date range.
+   */
+  incidentsDated: (dateFrom: string | null, dateTo: string | null) => Set<number>;
+  /** The earliest and latest incident dates, or null when no incident has a usable date. */
+  dateSpan: { earliest: string; latest: string } | null;
 }
+
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 const containsSequence = (words: readonly string[], sequence: readonly string[]) => {
   for (let start = 0; start + sequence.length <= words.length; start++) {
@@ -188,7 +197,26 @@ export const loadIncidentFacts = async (client: MongoClient): Promise<IncidentFa
 
   const dateOf = (incidentId: number) => dates.get(incidentId) ?? '';
 
+  // Dates in this form compare correctly as text, so ranges need no parsing.
+  const usableDates = Array.from(dates).filter(([, date]) => ISO_DAY.test(date));
+
+  const incidentsDated = (dateFrom: string | null, dateTo: string | null) =>
+    new Set(
+      usableDates
+        .filter(([, date]) => (!dateFrom || date >= dateFrom) && (!dateTo || date <= dateTo))
+        .map(([incidentId]) => incidentId)
+    );
+
+  const sortedDates = usableDates.map(([, date]) => date).sort();
+
+  const dateSpan =
+    sortedDates.length > 0
+      ? { earliest: sortedDates[0], latest: sortedDates[sortedDates.length - 1] }
+      : null;
+
   return {
+    incidentsDated,
+    dateSpan,
     incidentIds,
     incidentsWith,
     nameOf,

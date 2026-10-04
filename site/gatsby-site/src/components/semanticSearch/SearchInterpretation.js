@@ -2,6 +2,7 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faXmark } from '@fortawesome/free-solid-svg-icons';
+import DateRangeChip from './DateRangeChip';
 
 // Spells out "1 entity" or "6 entities", since these strings have no plural translations.
 const counted = (t, count, one, many) => (count === 1 ? t(one) : t(many, { count }));
@@ -48,6 +49,9 @@ function ExclusionChip({ constraint, onRemove }) {
   );
 }
 
+// The chip for each kind of constraint that is not an exclusion.
+const chipsByKind = { DATE_RANGE: DateRangeChip };
+
 /**
  * Shows how a query was read: the part ranked by meaning, each constraint applied to the results,
  * and anything that could not be applied. Each constraint can be removed, which searches again
@@ -74,17 +78,19 @@ export default function SearchInterpretation({
             {t('Searching: {{text}}', { text: semanticText })}
           </span>
         )}
-        {constraints.map((constraint, index) => (
-          <ExclusionChip
-            key={index}
-            constraint={constraint}
-            onRemove={() => onRemove(constraint)}
-          />
-        ))}
+        {constraints.map((constraint, index) => {
+          const Chip = chipsByKind[constraint.kind] ?? ExclusionChip;
+
+          return <Chip key={index} constraint={constraint} onRemove={() => onRemove(constraint)} />;
+        })}
       </div>
       {warnings.map((warning, index) => (
         <p key={index} className="mt-2 text-sm text-amber-700" data-cy="semantic-search-warning">
-          {warning.code === 'UNKNOWN_ENTITY'
+          {warning.code === 'INVALID_DATE'
+            ? t('Could not filter by “{{text}}”: dates are written as YYYY-MM-DD.', {
+                text: warning.text,
+              })
+            : warning.code === 'UNKNOWN_ENTITY'
             ? t('Could not exclude “{{text}}”: no organisation or system has that id.', {
                 text: warning.text,
               })
