@@ -16,16 +16,39 @@ const exampleQueries = [
 ];
 
 /**
- * Sends each held constraint back as one explicit filter on its first entity. The search lists the
- * entity whose whole name was written first, and filtering on it expands to the same entities
- * again. A constraint read from the first words of several names ("gpt") has no such entity, so
- * it comes back covering only its first entity's own family.
+ * Sends each chip's filter back with the next search. A typed exclusion is held by the words that
+ * named it, which the search reads again exactly as typed, so it keeps every entity it covered.
  */
-const filtersFor = (constraints) => ({
-  excludeEntities: constraints
-    .filter((constraint) => constraint.kind === 'EXCLUDE_ENTITY')
-    .map((constraint) => constraint.entities[0].entity_id),
+const filtersFor = (chips) => ({
+  excludeEntities: chips.flatMap(({ filter }) => (filter.id ? [filter.id] : [])),
+  excludeNames: chips.flatMap(({ filter }) => (filter.name ? [filter.name] : [])),
 });
+
+/**
+ * Pairs each exclusion a search applied with the filter that brings it back. An explicit one
+ * echoes the name or id it was sent as its matched text, so held chips keep their filter and their
+ * place, and a held filter that matches nothing any more is dropped. Newly typed ones follow, held
+ * by their matched text.
+ */
+const chipsFrom = (constraints, held) => {
+  const explicit = constraints.filter((constraint) => constraint.source === 'EXPLICIT_FILTER');
+
+  const kept = held.flatMap(({ filter }) => {
+    const index = explicit.findIndex(
+      (constraint) => constraint.matchedText === (filter.name ?? filter.id)
+    );
+
+    return index < 0 ? [] : [{ filter, constraint: explicit.splice(index, 1)[0] }];
+  });
+
+  const typed = constraints
+    .filter(
+      (constraint) => constraint.source === 'QUERY_TEXT' && constraint.kind === 'EXCLUDE_ENTITY'
+    )
+    .map((constraint) => ({ filter: { name: constraint.matchedText }, constraint }));
+
+  return [...kept, ...typed];
+};
 
 /**
  * Searches incidents by meaning using stored incident embeddings. Forms and example buttons share
@@ -38,8 +61,8 @@ export default function SemanticSearchPage() {
 
   const [submitted, setSubmitted] = useState('');
 
-  // The constraints of the latest search, shown as removable chips and sent with the next one.
-  const [constraints, setConstraints] = useState([]);
+  // The exclusions of the latest search, shown as removable chips and sent with the next one.
+  const [chips, setChips] = useState([]);
 
   const [search, { data, loading, error }] = useLazyQuery(SEMANTIC_SEARCH);
 
@@ -48,16 +71,16 @@ export default function SemanticSearchPage() {
   const results = response?.status === 'OK' ? response.results : [];
 
   /**
-   * Searches the text together with the held constraints. Once the text has been read, the box
-   * keeps only what is left to rank by meaning and the chips hold the constraints, so the next
-   * search parses only newly typed text and never applies a constraint twice.
+   * Searches the text together with the held chips. Once the text has been read, the box keeps
+   * only what is left to rank by meaning and the chips hold the constraints, so the next search
+   * parses only newly typed text and never applies a constraint twice.
    */
   const runSearch = async (text, held) => {
     const query = text.trim();
 
     setInput(query);
     setSubmitted(query);
-    setConstraints(held);
+    setChips(held);
 
     const { data: next, error: failed } = await search({
       variables: { query, filters: filtersFor(held) },
@@ -67,7 +90,7 @@ export default function SemanticSearchPage() {
 
     if (failed || !interpretation) return;
 
-    setConstraints(interpretation.constraints);
+    setChips(chipsFrom(interpretation.constraints, held));
 
     // A query in which nothing was read stays exactly as typed.
     if (interpretation.constraints.length > 0 || interpretation.warnings.length > 0) {
@@ -75,15 +98,15 @@ export default function SemanticSearchPage() {
     }
   };
 
-  const canSearch = Boolean(input.trim()) || constraints.length > 0;
+  const canSearch = Boolean(input.trim()) || chips.length > 0;
 
   const onSubmit = (event) => {
     event.preventDefault();
-    if (canSearch) runSearch(input, constraints);
+    if (canSearch) runSearch(input, chips);
   };
 
   const removeConstraint = (removed) => {
-    const remaining = constraints.filter((constraint) => constraint !== removed);
+    const remaining = chips.filter((chip) => chip.constraint !== removed);
 
     runSearch(input, remaining);
   };
@@ -111,7 +134,7 @@ export default function SemanticSearchPage() {
               key={query}
               type="button"
               disabled={loading}
-              onClick={() => runSearch(query, constraints)}
+              onClick={() => runSearch(query, chips)}
               className="rounded-full border border-blue-300 px-3 py-1 text-sm text-blue-700 hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
               data-cy={`semantic-search-example-${index + 1}`}
             >
@@ -140,7 +163,7 @@ export default function SemanticSearchPage() {
         {!loading && (
           <SearchInterpretation
             semanticText={response?.interpretation.semanticText}
-            constraints={constraints}
+            constraints={chips.map((chip) => chip.constraint)}
             warnings={response?.interpretation.warnings}
             onRemove={removeConstraint}
           />

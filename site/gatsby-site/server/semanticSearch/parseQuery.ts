@@ -41,7 +41,7 @@ export interface Vocabulary {
 export interface ExcludeEntityConstraint {
   kind: 'EXCLUDE_ENTITY';
   source: 'QUERY_TEXT' | 'EXPLICIT_FILTER';
-  /** The words written in the query or, for an explicit filter, the filtered entity's name. */
+  /** The words written in the query or, for an explicit filter, the name or entity id as given. */
   matchedText: string;
   roles: readonly EntityRole[];
   entities: ResolvedEntity[];
@@ -130,6 +130,30 @@ const withSingulars = (word: string): string[] => {
   return forms;
 };
 
+/** The entities the words name, trying singular forms of the last word after the word as written. */
+const readName = (words: string[], vocabulary: Vocabulary, allowNameStart: boolean) => {
+  for (const last of withSingulars(words[words.length - 1])) {
+    const entities = vocabulary.resolve([...words.slice(0, -1), last], RESPONSIBLE_ROLES, {
+      allowNameStart,
+    });
+    if (entities.length > 0) return entities;
+  }
+
+  return [];
+};
+
+/**
+ * The entities a name covers when it is written after a strong exclusion phrase such as
+ * "excluding", or an empty list when the whole text is not one known name. A name read from one
+ * query is read again by this to apply it to the next, so it covers the same entities, even when
+ * it is only the first words of several names ("gpt").
+ */
+export const readExcludedName = (name: string, vocabulary: Vocabulary): ResolvedEntity[] => {
+  const words = toWords(name);
+
+  return words.length > 0 ? readName(words, vocabulary, true) : [];
+};
+
 /** Collapses the gaps and stray separators left where constraint phrases were cut out. */
 const tidy = (text: string) =>
   text
@@ -179,13 +203,9 @@ export const parseQuery = (query: string, vocabulary: Vocabulary): Interpretatio
       if (crossesBreak) continue;
 
       const words = tokens.slice(start, end).map((token) => token.word);
+      const entities = readName(words, vocabulary, allowNameStart);
 
-      for (const last of withSingulars(words[count - 1])) {
-        const entities = vocabulary.resolve([...words.slice(0, -1), last], RESPONSIBLE_ROLES, {
-          allowNameStart,
-        });
-        if (entities.length > 0) return { start, end, entities };
-      }
+      if (entities.length > 0) return { start, end, entities };
     }
 
     return null;

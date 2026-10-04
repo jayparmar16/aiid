@@ -23,6 +23,8 @@ import {
   Constraint,
   InterpretationWarning,
   parseQuery,
+  readExcludedName,
+  ResolvedEntity,
   RESPONSIBLE_ROLES,
   toWords,
 } from '../semanticSearch/parseQuery';
@@ -120,7 +122,7 @@ const SemanticSearchConstraintType = new GraphQLObjectType({
     matchedText: {
       type: GraphQLString,
       description:
-        "The words in the query that named what the constraint covers or, for an explicit filter, the filtered entity's name.",
+        'The words in the query that named what the constraint covers or, for an explicit filter, the name or entity id exactly as given, so a caller can tell which filter it came from.',
     },
     entities: {
       type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(SemanticSearchEntityType))),
@@ -142,7 +144,7 @@ const SemanticSearchWarningType = new GraphQLObjectType({
           values: {
             UNRECOGNISED_EXCLUSION: {
               description:
-                'The words after an exclusion are not a known organisation or system, so nothing was excluded. The words were not searched for either.',
+                'The words after an exclusion, or a name in the filters, are not a known organisation or system, so nothing was excluded. The words were not searched for either.',
             },
             UNKNOWN_ENTITY: {
               description:
@@ -161,12 +163,17 @@ const SemanticSearchWarningType = new GraphQLObjectType({
 
 const SemanticSearchFiltersInput = new GraphQLInputObjectType({
   name: 'SemanticSearchFilters',
-  description: `Constraints passed directly instead of written in the query. They merge with the constraints read from the query text. A search takes at most ${MAX_ENTITY_FILTERS} entity filters.`,
+  description: `Constraints passed directly instead of written in the query. They merge with the constraints read from the query text. A search takes at most ${MAX_ENTITY_FILTERS} entity filters, ids and names together.`,
   fields: {
     excludeEntities: {
       type: new GraphQLList(new GraphQLNonNull(GraphQLString)),
       description:
-        'Entity ids to exclude. Each works as if its name had been written after "excluding", so it also covers entities named after it, and it removes incidents in which they are the alleged deployer, developer or implicated system.',
+        'Entity ids to exclude. Each works as if the entity\'s whole name had been written after "excluding": it also covers entities named after it and entities editors linked to it, and it removes incidents in which they are the alleged deployer, developer or implicated system.',
+    },
+    excludeNames: {
+      type: new GraphQLList(new GraphQLNonNull(GraphQLString)),
+      description:
+        'Names to exclude, each read exactly as if it had been written after "excluding", including the first words of a name ("clearview" for "Clearview AI"). The whole text must be one name. Sending back the matched text of a constraint read from an earlier query applies the same constraint again.',
     },
   },
 });
@@ -455,31 +462,41 @@ const plainInterpretation = (query: string) => ({
 
 interface SemanticSearchFilters {
   excludeEntities?: string[] | null;
+  excludeNames?: string[] | null;
 }
 
 /**
- * Reads each excluded entity id as if the entity's own name had been typed after "excluding", so
- * an explicit exclusion covers exactly the entities a typed one would.
+ * Reads each excluded entity id as if the entity's whole name had been typed after "excluding",
+ * and each excluded name as if it had been typed there itself, so an explicit exclusion covers
+ * exactly the entities a typed one would. Each constraint's matched text is the id or name as
+ * given, which tells a caller which filter it came from.
  */
-const explicitExclusions = (entityIds: readonly string[], facts: IncidentFacts) => {
+const explicitExclusions = (filters: SemanticSearchFilters, facts: IncidentFacts) => {
   const constraints: Constraint[] = [];
   const warnings: InterpretationWarning[] = [];
 
-  for (const entityId of new Set(entityIds)) {
+  const exclude = (matchedText: string, entities: ResolvedEntity[]) =>
+    constraints.push({
+      kind: 'EXCLUDE_ENTITY',
+      source: 'EXPLICIT_FILTER',
+      matchedText,
+      roles: RESPONSIBLE_ROLES,
+      entities,
+    });
+
+  for (const entityId of new Set(filters.excludeEntities ?? [])) {
     const name = facts.nameOf(entityId);
     const entities = name ? facts.resolve(toWords(name), RESPONSIBLE_ROLES) : [];
 
-    if (name && entities.length > 0) {
-      constraints.push({
-        kind: 'EXCLUDE_ENTITY',
-        source: 'EXPLICIT_FILTER',
-        matchedText: name,
-        roles: RESPONSIBLE_ROLES,
-        entities,
-      });
-    } else {
-      warnings.push({ code: 'UNKNOWN_ENTITY', text: entityId });
-    }
+    if (entities.length > 0) exclude(entityId, entities);
+    else warnings.push({ code: 'UNKNOWN_ENTITY', text: entityId });
+  }
+
+  for (const name of new Set(filters.excludeNames ?? [])) {
+    const entities = readExcludedName(name, facts);
+
+    if (entities.length > 0) exclude(name, entities);
+    else warnings.push({ code: 'UNRECOGNISED_EXCLUSION', text: name });
   }
 
   return { constraints, warnings };
@@ -509,7 +526,7 @@ const withoutRepeats = (constraints: Constraint[]) => {
  */
 const interpret = (query: string, facts: IncidentFacts, filters: SemanticSearchFilters) => {
   const parsed = parseQuery(query, facts);
-  const explicit = explicitExclusions(filters.excludeEntities ?? [], facts);
+  const explicit = explicitExclusions(filters, facts);
   const { semanticText } = parsed;
 
   // Explicit filters come first, so the constraints a page sends back keep their order and newly
@@ -570,7 +587,8 @@ export const queryFields: GraphQLFieldConfigMap<any, Context> = {
         MAX_LIMIT
       );
       const filters: SemanticSearchFilters = args.filters ?? {};
-      const entityFilterCount = filters.excludeEntities?.length ?? 0;
+      const entityFilterCount =
+        (filters.excludeEntities?.length ?? 0) + (filters.excludeNames?.length ?? 0);
 
       // Each entity filter costs a name expansion and an incident lookup, so their number is capped.
       // The error is returned, not thrown: in production the permissions layer replaces thrown

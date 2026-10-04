@@ -2494,7 +2494,7 @@ export type SemanticSearchConstraint = {
   /** How many incidents in the whole database the constraint applies to. */
   incidentCount: Scalars['Int']['output'];
   kind: SemanticSearchConstraintKind;
-  /** The words in the query that named what the constraint covers or, for an explicit filter, the filtered entity's name. */
+  /** The words in the query that named what the constraint covers or, for an explicit filter, the name or entity id exactly as given, so a caller can tell which filter it came from. */
   matchedText?: Maybe<Scalars['String']['output']>;
   source: SemanticSearchConstraintSource;
 };
@@ -2528,10 +2528,12 @@ export enum SemanticSearchEntityMatch {
   Name = 'NAME'
 }
 
-/** Constraints passed directly instead of written in the query. They merge with the constraints read from the query text. A search takes at most 20 entity filters. */
+/** Constraints passed directly instead of written in the query. They merge with the constraints read from the query text. A search takes at most 20 entity filters, ids and names together. */
 export type SemanticSearchFilters = {
-  /** Entity ids to exclude. Each works as if its name had been written after "excluding", so it also covers entities named after it, and it removes incidents in which they are the alleged deployer, developer or implicated system. */
+  /** Entity ids to exclude. Each works as if the entity's whole name had been written after "excluding": it also covers entities named after it and entities editors linked to it, and it removes incidents in which they are the alleged deployer, developer or implicated system. */
   excludeEntities?: InputMaybe<Array<Scalars['String']['input']>>;
+  /** Names to exclude, each read exactly as if it had been written after "excluding", including the first words of a name ("clearview" for "Clearview AI"). The whole text must be one name. Sending back the matched text of a constraint read from an earlier query applies the same constraint again. */
+  excludeNames?: InputMaybe<Array<Scalars['String']['input']>>;
 };
 
 /** How the query was read. */
@@ -2578,7 +2580,7 @@ export type SemanticSearchWarning = {
 export enum SemanticSearchWarningCode {
   /** An entity id in the filters is unknown, or its entity is never an alleged deployer, developer or implicated system, so that filter was not applied. */
   UnknownEntity = 'UNKNOWN_ENTITY',
-  /** The words after an exclusion are not a known organisation or system, so nothing was excluded. The words were not searched for either. */
+  /** The words after an exclusion, or a name in the filters, are not a known organisation or system, so nothing was excluded. The words were not searched for either. */
   UnrecognisedExclusion = 'UNRECOGNISED_EXCLUSION'
 }
 

@@ -444,33 +444,38 @@ test.describe('Semantic Search', () => {
   }) => {
     await login({ customData: { roles: ['subscriber'] } });
 
-    const tesla = {
+    // "gpt" starts several names and is none of them, so only the words can bring it back.
+    const gpt = (source: string) => ({
       kind: 'EXCLUDE_ENTITY',
-      source: 'QUERY_TEXT',
-      matchedText: 'tesla',
-      incidentCount: 50,
+      source,
+      matchedText: 'gpt',
+      incidentCount: 22,
       entities: [
-        { entity_id: 'tesla', name: 'Tesla', matchedBy: 'NAME' },
-        { entity_id: 'tesla-autopilot', name: 'Tesla Autopilot', matchedBy: 'FAMILY' },
+        { entity_id: 'gpt-3', name: 'GPT-3', matchedBy: 'FAMILY' },
+        { entity_id: 'gpt-4', name: 'GPT-4', matchedBy: 'FAMILY' },
       ],
-    };
+    });
 
-    const waymo = {
+    const openai = {
       kind: 'EXCLUDE_ENTITY',
       source: 'QUERY_TEXT',
-      matchedText: 'waymo',
-      incidentCount: 12,
-      entities: [{ entity_id: 'waymo', name: 'Waymo', matchedBy: 'NAME' }],
+      matchedText: 'openai',
+      incidentCount: 60,
+      entities: [{ entity_id: 'openai', name: 'OpenAI', matchedBy: 'NAME' }],
     };
 
     const readAs = (constraints: unknown[]) => ({
-      semanticText: 'self-driving car incidents',
+      semanticText: 'chatbot failures',
       constraints,
       warnings: [],
     });
 
     // The reply to each search in turn. The server merges the filters sent with what was typed.
-    const replies = [readAs([tesla]), readAs([tesla, waymo]), readAs([waymo])];
+    const replies = [
+      readAs([gpt('QUERY_TEXT')]),
+      readAs([gpt('EXPLICIT_FILTER'), openai]),
+      readAs([gpt('EXPLICIT_FILTER')]),
+    ];
     const requests: unknown[] = [];
 
     await page.route('**/graphql', async (route) => {
@@ -496,38 +501,42 @@ test.describe('Semantic Search', () => {
     const submit = page.locator('[data-cy="semantic-search-submit"]');
     const exclusion = page.locator('[data-cy="semantic-search-exclusion"]');
 
-    await input.fill('self-driving car incidents excluding tesla');
+    await input.fill('chatbot failures excluding gpt');
     await submit.click();
 
     await expect(exclusion).toHaveCount(1);
-    await expect(exclusion).toContainText('Excluding: Tesla');
-    await expect(input).toHaveValue('self-driving car incidents');
+    await expect(exclusion).toContainText('Excluding: gpt');
+    await expect(input).toHaveValue('chatbot failures');
 
-    await input.fill('self-driving car incidents excluding waymo');
+    await input.fill('chatbot failures excluding openai');
     await submit.click();
 
     await expect(exclusion).toHaveCount(2);
-    await expect(exclusion.nth(1)).toContainText('Excluding: Waymo');
-    await expect(input).toHaveValue('self-driving car incidents');
+    await expect(exclusion.nth(1)).toContainText('Excluding: OpenAI');
+    await expect(input).toHaveValue('chatbot failures');
 
     await exclusion
-      .filter({ hasText: 'Tesla' })
+      .filter({ hasText: 'OpenAI' })
       .locator('[data-cy="semantic-search-remove-constraint"]')
       .click();
 
-    // Each chip goes back as one filter on its first entity, never one per entity it covers.
+    // Each chip goes back as the words that named it, search after search, never as entity ids.
     await expect
       .poll(() => requests)
       .toEqual([
-        { query: 'self-driving car incidents excluding tesla', filters: { excludeEntities: [] } },
         {
-          query: 'self-driving car incidents excluding waymo',
-          filters: { excludeEntities: ['tesla'] },
+          query: 'chatbot failures excluding gpt',
+          filters: { excludeEntities: [], excludeNames: [] },
         },
-        { query: 'self-driving car incidents', filters: { excludeEntities: ['waymo'] } },
+        {
+          query: 'chatbot failures excluding openai',
+          filters: { excludeEntities: [], excludeNames: ['gpt'] },
+        },
+        { query: 'chatbot failures', filters: { excludeEntities: [], excludeNames: ['gpt'] } },
       ]);
     await expect(exclusion).toHaveCount(1);
-    await expect(exclusion).toContainText('Excluding: Waymo');
-    await expect(input).toHaveValue('self-driving car incidents');
+    await expect(exclusion).toContainText('Excluding: gpt');
+    await expect(exclusion).toContainText('2 entities · 22 incidents');
+    await expect(input).toHaveValue('chatbot failures');
   });
 });

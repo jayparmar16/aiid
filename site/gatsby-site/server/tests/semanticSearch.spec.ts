@@ -374,7 +374,10 @@ describe('semanticSearch exclusions', () => {
 
   const search = (
     query: string,
-    variables: { limit?: number; filters?: { excludeEntities?: string[] } } = {}
+    variables: {
+      limit?: number;
+      filters?: { excludeEntities?: string[]; excludeNames?: string[] };
+    } = {}
   ) =>
     makeRequest(url, {
       query: `
@@ -687,7 +690,7 @@ describe('semanticSearch exclusions', () => {
     expect(excludedIds(await search('crashes excluding nova'))).toEqual([['nova']]);
   });
 
-  it('applies an explicit exclusion exactly as a typed one', async () => {
+  it('applies an excluded entity id exactly as its typed name', async () => {
     embedAs([1, 0]);
 
     const typed = await search('self-driving car incidents excluding tesla');
@@ -705,7 +708,7 @@ describe('semanticSearch exclusions', () => {
         {
           ...interpretationOf(typed).constraints[0],
           source: 'EXPLICIT_FILTER',
-          matchedText: 'Tesla',
+          matchedText: 'tesla',
         },
       ],
     });
@@ -715,7 +718,7 @@ describe('semanticSearch exclusions', () => {
     embedAs([1, 0]);
 
     const response = await search('crashes excluding waymo and teslas', {
-      filters: { excludeEntities: ['tesla', 'uber', 'tesla'] },
+      filters: { excludeEntities: ['uber', 'uber'], excludeNames: ['Tesla', 'tesla'] },
     });
 
     expect(embedded).toEqual(['crashes']);
@@ -725,38 +728,72 @@ describe('semanticSearch exclusions', () => {
         matchedText,
       ])
     ).toEqual([
+      ['EXPLICIT_FILTER', 'uber'],
       ['EXPLICIT_FILTER', 'Tesla'],
-      ['EXPLICIT_FILTER', 'Uber'],
       ['QUERY_TEXT', 'waymo'],
     ]);
     expect(resultIds(response)).toEqual([15]);
   });
 
-  it('reproduces each constraint from its first entity, as the page sends them back', async () => {
+  it('reads each constraint again from its matched text, as the page sends them back', async () => {
     embedAs([1, 0]);
 
-    const typed = await search('crashes excluding tesla, waymo and clearview');
+    // Several names start with "gpt" and none is just "GPT", so no one entity stands for them all.
+    await seedCollection({
+      name: 'entities',
+      docs: [
+        { entity_id: 'gpt-3', name: 'GPT-3' },
+        { entity_id: 'gpt-4', name: 'GPT-4' },
+      ],
+      drop: false,
+    });
+    await seedCollection({
+      name: 'incidents',
+      docs: [
+        incident(30, 'GPT-3 invents court cases', { implicated: ['gpt-3'] }),
+        incident(31, 'GPT-4 reveals its instructions', { developer: ['gpt-4'] }),
+      ],
+      drop: false,
+    });
+    await seedCollection({
+      name: 'incident_embeddings',
+      docs: [vectors(30, [0.78, 0.63]), vectors(31, [0.76, 0.65])],
+      drop: false,
+    });
+
+    const typed = await search('crashes excluding teslas, clearview and gpt');
     const { semanticText, constraints } = interpretationOf(typed);
 
+    expect(excludedIds(typed)).toEqual([
+      ['tesla', 'tesla-autopilot', 'tesla-full-self-driving-(fsd)'],
+      ['clearview-ai'],
+      ['gpt-3', 'gpt-4'],
+    ]);
+
     const held = await search(semanticText, {
-      filters: {
-        excludeEntities: constraints.map((constraint: any) => constraint.entities[0].entity_id),
-      },
+      filters: { excludeNames: constraints.map((constraint: any) => constraint.matchedText) },
     });
 
     expect(embedded).toEqual(['crashes', 'crashes']);
-    expect(excludedIds(held)).toEqual(excludedIds(typed));
-    expect(
-      interpretationOf(held).constraints.map((constraint: any) => constraint.incidentCount)
-    ).toEqual(constraints.map((constraint: any) => constraint.incidentCount));
-    expect(resultIds(held)).toEqual(resultIds(typed));
+    expect(interpretationOf(held)).toEqual({
+      semanticText: 'crashes',
+      warnings: [],
+      constraints: constraints.map((constraint: any) => ({
+        ...constraint,
+        source: 'EXPLICIT_FILTER',
+      })),
+    });
+    expect(resultIds(held)).toEqual([12, 13, 15]);
   });
 
-  it('reports unknown entity ids as warnings and searches without them', async () => {
+  it('reports unknown entity ids and names as warnings and searches without them', async () => {
     embedAs([1, 0]);
 
     const response = await search('crashes', {
-      filters: { excludeEntities: ['no-such-entity', 'tesla-drivers'] },
+      filters: {
+        excludeEntities: ['no-such-entity', 'tesla-drivers'],
+        excludeNames: ['robocall operators', 'tesla vehicles'],
+      },
     });
 
     expect(response.body.errors).toBeUndefined();
@@ -768,6 +805,9 @@ describe('semanticSearch exclusions', () => {
         { code: 'UNKNOWN_ENTITY', text: 'no-such-entity' },
         // Tesla drivers are only ever a harmed party, so there is nothing to exclude them from.
         { code: 'UNKNOWN_ENTITY', text: 'tesla-drivers' },
+        { code: 'UNRECOGNISED_EXCLUSION', text: 'robocall operators' },
+        // A filter is one name, so words left over after a name make it unknown.
+        { code: 'UNRECOGNISED_EXCLUSION', text: 'tesla vehicles' },
       ],
     });
     expect(resultIds(response)).toEqual([10, 11, 12, 13, 15]);
@@ -776,7 +816,7 @@ describe('semanticSearch exclusions', () => {
   it('reads explicit filters when the query is empty, without embedding anything', async () => {
     embedAs([1, 0]);
 
-    const response = await search('  ', { filters: { excludeEntities: ['tesla'] } });
+    const response = await search('  ', { filters: { excludeNames: ['tesla'] } });
 
     expect(response.body.errors).toBeUndefined();
     expect(embedded).toEqual([]);
@@ -786,17 +826,22 @@ describe('semanticSearch exclusions', () => {
     ]);
   });
 
-  it('refuses more than 20 entity filters with an error saying so', async () => {
+  it('refuses more than 20 entity filters, ids and names together, saying so', async () => {
     embedAs([1, 0]);
 
-    const ids = (count: number) => Array.from({ length: count }, (_, index) => `entity-${index}`);
+    const values = (prefix: string, count: number) =>
+      Array.from({ length: count }, (_, index) => `${prefix}-${index}`);
 
-    const accepted = await search('crashes', { filters: { excludeEntities: ids(20) } });
+    const accepted = await search('crashes', {
+      filters: { excludeEntities: values('entity', 10), excludeNames: values('name', 10) },
+    });
 
     expect(accepted.body.errors).toBeUndefined();
     expect(interpretationOf(accepted).warnings).toHaveLength(20);
 
-    const refused = await search('crashes', { filters: { excludeEntities: ids(21) } });
+    const refused = await search('crashes', {
+      filters: { excludeEntities: values('entity', 10), excludeNames: values('name', 11) },
+    });
 
     expect(refused.body.data).toBeNull();
     expect(refused.body.errors).toEqual([
