@@ -6,6 +6,24 @@ import { faSort, faSortDown, faSortUp } from '@fortawesome/free-solid-svg-icons'
 import Link from 'components/ui/Link';
 import Table, { formatDateField } from 'components/ui/Table';
 
+// Orders scores as numbers, since the default alphanumeric sort misorders decimals. Results
+// listed by date have no score: they stay below scored ones and in the order they came, newest
+// first, whichever way the column is sorted. The table reverses ties when sorting descending, so
+// unscored rows are compared by position instead.
+const byScore = (left, right, columnId, desc) => {
+  const leftScore = left.values[columnId];
+
+  const rightScore = right.values[columnId];
+
+  const direction = desc ? -1 : 1;
+
+  if (leftScore == null && rightScore == null) return (left.index - right.index) * direction;
+
+  if (leftScore == null || rightScore == null) return (leftScore == null ? 1 : -1) * direction;
+
+  return leftScore - rightScore;
+};
+
 // Header that toggles sorting on click and shows the current sort direction.
 function SortHeader({ column }) {
   const icon = column.isSorted ? (column.isSortedDesc ? faSortDown : faSortUp) : faSort;
@@ -24,7 +42,7 @@ function SortHeader({ column }) {
 
 /**
  * Lists search results with sortable columns and pagination, rendered through the shared Table.
- * Rows start sorted by score, best match first.
+ * Rows start sorted by score, best match first. Unscored results keep the order the search gave.
  */
 export default function SemanticSearchTable({ results }) {
   const { t } = useTranslation();
@@ -39,10 +57,10 @@ export default function SemanticSearchTable({ results }) {
       {
         title: t('Score'),
         accessor: 'score',
-        // Compares numbers, since the default alphanumeric sort misorders decimals.
-        sortType: 'basic',
+        sortType: byScore,
         sortDescFirst: true,
-        Cell: ({ value }) => value.toFixed(3),
+        // A dash rather than a blank, so a result listed by date doesn't read as a weak match.
+        Cell: ({ value }) => (value == null ? '—' : value.toFixed(3)),
       },
       {
         title: t('Incident ID'),

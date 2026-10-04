@@ -12,9 +12,10 @@ const unconstrained = { semanticText: '', constraints: [], warnings: [] };
 const response = (
   status: string,
   results: unknown[] = [],
-  interpretation: unknown = unconstrained
+  interpretation: unknown = unconstrained,
+  totalCount = results.length
 ) => ({
-  data: { semanticSearch: { status, results, interpretation } },
+  data: { semanticSearch: { status, totalCount, results, interpretation } },
 });
 
 const results = Array.from({ length: 30 }, (_, index) => ({
@@ -690,5 +691,90 @@ test.describe('Semantic Search', () => {
 
     // The options are loaded once, however many searches follow.
     expect(facetRequests).toBe(1);
+  });
+
+  test('lists a search made only of constraints newest first, without scores', async ({
+    page,
+    login,
+  }) => {
+    await login({ customData: { roles: ['subscriber'] } });
+
+    const excludingTesla = {
+      semanticText: '',
+      constraints: [
+        {
+          kind: 'EXCLUDE_ENTITY',
+          source: 'QUERY_TEXT',
+          matchedText: 'tesla',
+          incidentCount: 50,
+          entities: [{ entity_id: 'tesla', name: 'Tesla', matchedBy: 'NAME' }],
+        },
+      ],
+      warnings: [],
+    };
+
+    // Listed by date, newest first, as the server orders a search with nothing to rank by meaning.
+    const newestFirst = [
+      { incident_id: 7, title: 'Newest incident', date: '2025-06-01' },
+      { incident_id: 5, title: 'Middle incident', date: '2023-02-01' },
+      { incident_id: 9, title: 'Oldest incident', date: '2019-11-01' },
+    ].map((incident) => ({ score: null, incident: { ...incident, description: incident.title } }));
+
+    await page.route('**/graphql', async (route) => {
+      const request = route.request().postDataJSON();
+
+      if (request.operationName !== 'SemanticSearch') {
+        await route.continue();
+        return;
+      }
+
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(response('OK', newestFirst, excludingTesla, 312)),
+      });
+    });
+
+    await page.goto(url);
+
+    const input = page.locator('[data-cy="semantic-search-input"]');
+    const rows = page.locator('[data-cy="row"]');
+
+    await input.fill('incidents excluding tesla');
+    await page.locator('[data-cy="semantic-search-submit"]').click();
+
+    await expect(page.locator('[data-cy="semantic-search-count"]')).toHaveText('Showing 3 of 312');
+    await expect(page.locator('[data-cy="semantic-search-exclusion"]')).toContainText(
+      'Excluding: Tesla'
+    );
+    await expect(page.locator('[data-cy="semantic-search-semantic-text"]')).toHaveCount(0);
+    await expect(input).toHaveValue('');
+
+    const expectNewestFirst = async () => {
+      await expect(rows).toHaveCount(3);
+
+      for (const [index, title] of ['Newest', 'Middle', 'Oldest'].entries()) {
+        await expect(rows.nth(index)).toContainText(`${title} incident`);
+        await expect(rows.nth(index).locator('[data-cy="cell"]').first()).toHaveText('—');
+      }
+    };
+
+    await expectNewestFirst();
+
+    // Sorting by score in either direction leaves unscored results in the order they came.
+    await page.locator('[data-cy="header-score"] button').click();
+    await expectNewestFirst();
+
+    const csvDownloadPromise = page.waitForEvent('download');
+    await page.locator('[data-cy="semantic-search-export-csv"]').click();
+    const csv = await readFile((await (await csvDownloadPromise).path())!, 'utf8');
+
+    expect(csv).toContain('"","7","2025-06-01","Newest incident"');
+
+    const xlsxDownloadPromise = page.waitForEvent('download');
+    await page.locator('[data-cy="semantic-search-export"]').click();
+    const workbook = readWorkbook(await readFile((await (await xlsxDownloadPromise).path())!));
+
+    expect(workbook.Results[1].slice(0, 2)).toEqual(['', '7']);
   });
 });

@@ -4,6 +4,7 @@ export const SEMANTIC_SEARCH = gql(`
   query SemanticSearch($query: String!, $limit: Int, $filters: SemanticSearchFilters) {
     semanticSearch(query: $query, limit: $limit, filters: $filters) {
       status
+      totalCount
       results {
         score
         incident {

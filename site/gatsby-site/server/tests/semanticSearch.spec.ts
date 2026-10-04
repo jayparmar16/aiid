@@ -384,7 +384,8 @@ describe('semanticSearch exclusions', () => {
         query SemanticSearch($query: String!, $limit: Int, $filters: SemanticSearchFilters) {
           semanticSearch(query: $query, limit: $limit, filters: $filters) {
             status
-            results { incident { incident_id } }
+            totalCount
+            results { score incident { incident_id } }
             interpretation {
               semanticText
               constraints {
@@ -459,23 +460,42 @@ describe('semanticSearch exclusions', () => {
     await seedCollection({ name: 'entity_relationships', docs: [] });
 
     // Scores against the query vector [1, 0]: 10 > 11 > 12 > 13 > 15, and 14 is below the threshold.
+    // Newest first, they run 15 and 13 (the same day), 11, 14, 10, 12.
     await seedCollection({
       name: 'incidents',
       docs: [
-        incident(10, 'Tesla on Autopilot crashes', {
-          deployer: ['tesla'],
-          developer: ['tesla'],
-          implicated: ['tesla-autopilot'],
-        }),
-        incident(11, 'Full Self-Driving runs a red light', {
-          implicated: ['tesla-full-self-driving-(fsd)'],
-        }),
+        {
+          ...incident(10, 'Tesla on Autopilot crashes', {
+            deployer: ['tesla'],
+            developer: ['tesla'],
+            implicated: ['tesla-autopilot'],
+          }),
+          date: '2018-03-23',
+        },
+        {
+          ...incident(11, 'Full Self-Driving runs a red light', {
+            implicated: ['tesla-full-self-driving-(fsd)'],
+          }),
+          date: '2023-06-01',
+        },
         // Its coverage compares Uber with Tesla, but Tesla has no role in the incident.
-        incident(12, 'Uber test car kills a pedestrian', { deployer: ['uber'] }, [101]),
+        {
+          ...incident(12, 'Uber test car kills a pedestrian', { deployer: ['uber'] }, [101]),
+          date: '2018-03-18',
+        },
         // Tesla drivers were harmed here, which never makes Tesla responsible.
-        incident(13, 'Waymo hits a Tesla', { deployer: ['waymo'], harmed: ['tesla-drivers'] }),
-        incident(14, 'Unrelated incident', { deployer: ['clearview-ai'] }),
-        incident(15, 'Students misuse a chatbot', { deployer: ['students'] }),
+        {
+          ...incident(13, 'Waymo hits a Tesla', { deployer: ['waymo'], harmed: ['tesla-drivers'] }),
+          date: '2024-05-10',
+        },
+        {
+          ...incident(14, 'Unrelated incident', { deployer: ['clearview-ai'] }),
+          date: '2021-01-01',
+        },
+        {
+          ...incident(15, 'Students misuse a chatbot', { deployer: ['students'] }),
+          date: '2024-05-10',
+        },
       ],
     });
 
@@ -943,6 +963,140 @@ describe('semanticSearch exclusions', () => {
         entity_id: 'nova',
         name: 'Nova',
       });
+    });
+  });
+
+  describe('with nothing left to rank by meaning', () => {
+    const scoresOf = (response: any) =>
+      response.body.data.semanticSearch.results.map((result: any) => result.score);
+
+    it('lists the allowed incidents newest first, without embedding anything', async () => {
+      embedAs([1, 0]);
+
+      const response = await search('incidents excluding tesla');
+
+      expect(response.body.errors).toBeUndefined();
+      expect(embedded).toEqual([]);
+      expect(global.fetch).not.toHaveBeenCalled();
+      expect(response.body.data.semanticSearch.status).toBe('OK');
+      expect(interpretationOf(response).semanticText).toBe('');
+      expect(excludedIds(response)).toEqual([
+        ['tesla', 'tesla-autopilot', 'tesla-full-self-driving-(fsd)'],
+      ]);
+      // 15 and 13 share a date, so the newer id comes first. 14 is listed although no meaning
+      // would have ranked it.
+      expect(resultIds(response)).toEqual([15, 13, 14, 12]);
+      expect(scoresOf(response)).toEqual([null, null, null, null]);
+      expect(response.body.data.semanticSearch.totalCount).toBe(4);
+    });
+
+    it('stops at the limit and still counts every allowed incident', async () => {
+      embedAs([1, 0]);
+
+      const response = await search('incidents excluding tesla', { limit: 2 });
+
+      expect(resultIds(response)).toEqual([15, 13]);
+      expect(response.body.data.semanticSearch.totalCount).toBe(4);
+    });
+
+    it.each([
+      'excluding tesla',
+      'incidents excluding tesla',
+      'Incident, excluding Tesla.',
+      'cases except tesla',
+      'related incidents excluding tesla',
+      'incidents involving AI excluding tesla',
+      'all the incidents excluding tesla',
+    ])('treats what is left of %p as filler', async (query) => {
+      embedAs([1, 0]);
+
+      const response = await search(query);
+
+      expect(embedded).toEqual([]);
+      expect(interpretationOf(response).semanticText).toBe('');
+      expect(resultIds(response)).toEqual([15, 13, 14, 12]);
+    });
+
+    it('embeds anything meaningful left over unchanged, filler included', async () => {
+      embedAs([1, 0]);
+
+      const response = await search('AI incidents involving robots, excluding tesla');
+
+      expect(embedded).toEqual(['AI incidents involving robots']);
+      expect(interpretationOf(response).semanticText).toBe('AI incidents involving robots');
+      expect(scoresOf(response).every((score: unknown) => typeof score === 'number')).toBe(true);
+    });
+
+    it('embeds a query without constraints exactly as written, even when it is only filler', async () => {
+      embedAs([1, 0]);
+
+      const filler = await search('Incidents involving AI');
+      const plain = await search('related incidents');
+
+      expect(embedded).toEqual(['Incidents involving AI', 'related incidents']);
+      expect(interpretationOf(filler).semanticText).toBe('Incidents involving AI');
+      expect(resultIds(plain)).toEqual([10, 11, 12, 13, 15]);
+    });
+
+    it('takes the same path for an empty or filler query sent with explicit filters', async () => {
+      embedAs([1, 0]);
+
+      const empty = await search('', { filters: { excludeEntities: ['tesla'] } });
+      const filler = await search('incidents', { filters: { excludeNames: ['tesla'] } });
+
+      expect(embedded).toEqual([]);
+      expect(resultIds(empty)).toEqual([15, 13, 14, 12]);
+      expect(scoresOf(empty)).toEqual([null, null, null, null]);
+      expect(empty.body.data.semanticSearch.totalCount).toBe(4);
+      expect(interpretationOf(filler).semanticText).toBe('');
+      expect(resultIds(filler)).toEqual([15, 13, 14, 12]);
+    });
+
+    it('returns nothing when no constraint applies', async () => {
+      embedAs([1, 0]);
+
+      const empty = await search('');
+      const unknown = await search('', { filters: { excludeEntities: ['no-such-entity'] } });
+      const unrecognised = await search('incidents excluding robocall operators');
+
+      expect(embedded).toEqual([]);
+
+      for (const response of [empty, unknown, unrecognised]) {
+        expect(response.body.data.semanticSearch).toMatchObject({
+          status: 'OK',
+          results: [],
+          totalCount: 0,
+        });
+      }
+
+      expect(interpretationOf(unrecognised).warnings).toEqual([
+        { code: 'UNRECOGNISED_EXCLUSION', text: 'robocall operators' },
+      ]);
+    });
+  });
+
+  it('counts every incident above the minimum score before the limit', async () => {
+    embedAs([1, 0]);
+
+    const plain = await search('crashes', { limit: 2 });
+
+    expect(resultIds(plain)).toEqual([10, 11]);
+    expect(plain.body.data.semanticSearch.totalCount).toBe(5);
+
+    const excluding = await search('crashes excluding tesla', { limit: 1 });
+
+    expect(resultIds(excluding)).toEqual([12]);
+    expect(excluding.body.data.semanticSearch.totalCount).toBe(3);
+  });
+
+  it('counts nothing when embedding is limited', async () => {
+    stubEmbedding(async () => new Response('rate limited', { status: 429 }));
+
+    const limited = await search('crashes');
+
+    expect(limited.body.data.semanticSearch).toMatchObject({
+      status: 'QUOTA_EXHAUSTED',
+      totalCount: 0,
     });
   });
 

@@ -22,6 +22,7 @@ import { IncidentFacts, loadIncidentFacts } from '../semanticSearch/incidentFact
 import {
   Constraint,
   InterpretationWarning,
+  meaningLeftIn,
   parseQuery,
   readExcludedName,
   ResolvedEntity,
@@ -57,8 +58,9 @@ const SemanticSearchResultType = new GraphQLObjectType({
   name: 'SemanticSearchResult',
   fields: {
     score: {
-      type: new GraphQLNonNull(GraphQLFloat),
-      description: 'Weighted cosine similarity across the incident overview and best passage.',
+      type: GraphQLFloat,
+      description:
+        'Weighted cosine similarity across the incident overview and best passage. Null when nothing was left to rank by meaning and results are listed newest first.',
     },
     incident: { type: new GraphQLNonNull(IncidentType) },
   },
@@ -201,6 +203,11 @@ const SemanticSearchResponseType = new GraphQLObjectType({
     status: { type: new GraphQLNonNull(SemanticSearchStatusType) },
     results: {
       type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(SemanticSearchResultType))),
+    },
+    totalCount: {
+      type: new GraphQLNonNull(GraphQLInt),
+      description:
+        'How many incidents matched before the limit was applied: those scoring above the minimum when ranked by meaning, or every incident the constraints allow when listed newest first.',
     },
     interpretation: {
       type: new GraphQLNonNull(SemanticSearchInterpretationType),
@@ -431,8 +438,31 @@ const embedQuery = async (query: string): Promise<Embedded> => {
 
 interface SearchResponse {
   status: 'OK' | 'QUOTA_EXHAUSTED' | 'UNAVAILABLE';
-  results: { score: number; incident: DBIncident }[];
+  results: { score: number | null; incident: DBIncident }[];
+  totalCount: number;
 }
+
+const noResults = (status: SearchResponse['status']): SearchResponse => ({
+  status,
+  results: [],
+  totalCount: 0,
+});
+
+/** The incidents with these ids, in the order given, skipping any that no longer exist. */
+const findIncidents = async (context: Context, incidentIds: number[]) => {
+  const incidents = await context.client
+    .db('aiidprod')
+    .collection<DBIncident>('incidents')
+    .find({ incident_id: { $in: incidentIds } })
+    .toArray();
+  const byId = new Map(incidents.map((incident) => [incident.incident_id, incident]));
+
+  return incidentIds.flatMap((incidentId) => {
+    const incident = byId.get(incidentId);
+
+    return incident ? [incident] : [];
+  });
+};
 
 /** Embeds the semantic text and returns the allowed incidents that are closest to it in meaning. */
 const searchByMeaning = async (
@@ -442,7 +472,7 @@ const searchByMeaning = async (
   allowedIncidentIds?: ReadonlySet<number>
 ): Promise<SearchResponse> => {
   const embedded = await embedQuery(semanticText);
-  if ('status' in embedded) return { status: embedded.status, results: [] };
+  if ('status' in embedded) return noResults(embedded.status);
 
   try {
     const stored = await loadVectors(
@@ -452,25 +482,63 @@ const searchByMeaning = async (
       embedded.vector.length
     );
 
-    if (stored.length === 0) return { status: 'UNAVAILABLE', results: [] };
+    if (stored.length === 0) return noResults('UNAVAILABLE');
 
-    const hits = rankIncidentVectors(stored, embedded.vector, limit, MIN_SCORE, allowedIncidentIds);
-    const incidents = await context.client
-      .db('aiidprod')
-      .collection<DBIncident>('incidents')
-      .find({ incident_id: { $in: hits.map((hit) => hit.incident_id) } })
-      .toArray();
-    const byId = new Map(incidents.map((incident) => [incident.incident_id, incident]));
-    const results = hits.flatMap((hit) => {
-      const incident = byId.get(hit.incident_id);
+    // Every hit above the minimum score is kept, so the total can be reported before the limit.
+    const ranked = rankIncidentVectors(
+      stored,
+      embedded.vector,
+      Infinity,
+      MIN_SCORE,
+      allowedIncidentIds
+    );
+    const hits = ranked.slice(0, limit);
+    const scores = new Map(hits.map((hit) => [hit.incident_id, hit.score]));
+    const incidents = await findIncidents(
+      context,
+      hits.map((hit) => hit.incident_id)
+    );
 
-      return incident ? [{ score: hit.score, incident }] : [];
-    });
-
-    return { status: 'OK', results };
+    return {
+      status: 'OK',
+      results: incidents.map((incident) => ({
+        score: scores.get(incident.incident_id)!,
+        incident,
+      })),
+      totalCount: ranked.length,
+    };
   } catch (error) {
     Sentry.captureException(error);
-    return { status: 'UNAVAILABLE', results: [] };
+    return noResults('UNAVAILABLE');
+  }
+};
+
+/**
+ * Lists the allowed incidents newest first, for a search with nothing left to rank by meaning. It
+ * needs no embedding request, so it spends none of the provider's allowance. Incidents dated the
+ * same day are listed newest id first.
+ */
+const listNewestFirst = async (
+  context: Context,
+  facts: IncidentFacts,
+  allowedIncidentIds: ReadonlySet<number>,
+  limit: number
+): Promise<SearchResponse> => {
+  const newest = Array.from(allowedIncidentIds)
+    .sort((left, right) => facts.dateOf(right).localeCompare(facts.dateOf(left)) || right - left)
+    .slice(0, limit);
+
+  try {
+    const incidents = await findIncidents(context, newest);
+
+    return {
+      status: 'OK',
+      results: incidents.map((incident) => ({ score: null, incident })),
+      totalCount: allowedIncidentIds.size,
+    };
+  } catch (error) {
+    Sentry.captureException(error);
+    return noResults('UNAVAILABLE');
   }
 };
 
@@ -547,7 +615,6 @@ const withoutRepeats = (constraints: Constraint[]) => {
 const interpret = (query: string, facts: IncidentFacts, filters: SemanticSearchFilters) => {
   const parsed = parseQuery(query, facts);
   const explicit = explicitExclusions(filters, facts);
-  const { semanticText } = parsed;
 
   // Explicit filters come first, so the constraints a page sends back keep their order and newly
   // typed ones follow them.
@@ -563,6 +630,11 @@ const interpret = (query: string, facts: IncidentFacts, filters: SemanticSearchF
   }));
 
   const excluded = new Set(applied.flatMap(({ incidents }) => Array.from(incidents)));
+
+  // Explicit filters are constraints taken out of the query too, so a query of filler words sent
+  // with them leaves nothing to rank by meaning. Without constraints it is ranked as written.
+  const semanticText =
+    applied.length > 0 ? meaningLeftIn(parsed.semanticText) : parsed.semanticText;
 
   const allowedIncidentIds =
     applied.length > 0
@@ -621,7 +693,7 @@ export const queryFields: GraphQLFieldConfigMap<any, Context> = {
       }
 
       if (!query && entityFilterCount === 0) {
-        return { status: 'OK', results: [], interpretation: plainInterpretation(query) };
+        return { ...noResults('OK'), interpretation: plainInterpretation(query) };
       }
 
       let facts: IncidentFacts;
@@ -630,7 +702,7 @@ export const queryFields: GraphQLFieldConfigMap<any, Context> = {
         facts = await cachedFacts(FACTS_CACHE_KEY, () => loadIncidentFacts(context.client));
       } catch (error) {
         Sentry.captureException(error);
-        return { status: 'UNAVAILABLE', results: [], interpretation: plainInterpretation(query) };
+        return { ...noResults('UNAVAILABLE'), interpretation: plainInterpretation(query) };
       }
 
       // Only the semantic text is embedded. It is settled here, before any embedding request,
@@ -638,7 +710,13 @@ export const queryFields: GraphQLFieldConfigMap<any, Context> = {
       const { interpretation, allowedIncidentIds } = interpret(query, facts, filters);
       const { semanticText } = interpretation;
 
-      if (!semanticText) return { status: 'OK', results: [], interpretation };
+      if (!semanticText) {
+        const response = allowedIncidentIds
+          ? await listNewestFirst(context, facts, allowedIncidentIds, limit)
+          : noResults('OK');
+
+        return { ...response, interpretation };
+      }
 
       const response = await searchByMeaning(context, semanticText, limit, allowedIncidentIds);
 
