@@ -34,6 +34,7 @@ import { IncidentType } from '../types/incidents';
 const EMBEDDING_SCHEMA_VERSION = 2;
 const MAX_QUERY_CHARS = 500;
 const MAX_ENTITY_FILTERS = 20;
+const MAX_SUGGESTIONS = 3;
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
 const MIN_SCORE = 0.15;
@@ -106,6 +107,10 @@ const SemanticSearchConstraintType = new GraphQLObjectType({
               description:
                 'Removes incidents in which a covered entity is the alleged deployer, developer or implicated system.',
             },
+            MIT_RISK_DOMAIN: {
+              description:
+                'Keeps incidents whose published MIT classification has the risk domain. Several domains keep incidents with any of them, and incidents without an MIT classification never match. Only ever applied from the filters, never read from the query text.',
+            },
           },
         })
       ),
@@ -128,6 +133,10 @@ const SemanticSearchConstraintType = new GraphQLObjectType({
     },
     entities: {
       type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(SemanticSearchEntityType))),
+    },
+    mitRiskDomain: {
+      type: GraphQLString,
+      description: 'The MIT risk domain an MIT_RISK_DOMAIN constraint keeps, exactly as stored.',
     },
     incidentCount: {
       type: new GraphQLNonNull(GraphQLInt),
@@ -152,13 +161,17 @@ const SemanticSearchWarningType = new GraphQLObjectType({
               description:
                 'An entity id in the filters is unknown, or its entity is never an alleged deployer, developer or implicated system, so that filter was not applied.',
             },
+            UNKNOWN_MIT_DOMAIN: {
+              description:
+                'A value in `mitRiskDomains` is not one of the MIT risk domains, so that filter was not applied.',
+            },
           },
         })
       ),
     },
     text: {
       type: new GraphQLNonNull(GraphQLString),
-      description: 'The words or entity id concerned, as given.',
+      description: 'The words, entity id or MIT value concerned, as given.',
     },
   },
 });
@@ -177,6 +190,37 @@ const SemanticSearchFiltersInput = new GraphQLInputObjectType({
       description:
         'Names to exclude, each read exactly as if it had been written after "excluding", including the first words of a name ("clearview" for "Clearview AI"). The whole text must be one name. Sending back the matched text of a constraint read from an earlier query applies the same constraint again.',
     },
+    mitRiskDomains: {
+      type: new GraphQLList(new GraphQLNonNull(GraphQLString)),
+      description:
+        'MIT risk domains, exactly as `semanticSearchFacets` lists them. Incidents with any of them are kept, and incidents without an MIT classification are left out. They do not count towards the entity filter limit.',
+    },
+  },
+});
+
+const SemanticSearchSuggestionType = new GraphQLObjectType({
+  name: 'SemanticSearchSuggestion',
+  description:
+    'A filter the query hints at without asking for it. Nothing is applied until the caller sends it back in the filters.',
+  fields: {
+    kind: {
+      type: new GraphQLNonNull(
+        new GraphQLEnumType({
+          name: 'SemanticSearchSuggestionKind',
+          values: {
+            MIT_RISK_DOMAIN: {
+              description:
+                'The query names an MIT risk domain. Accepting it adds `value` to `mitRiskDomains`.',
+            },
+          },
+        })
+      ),
+    },
+    value: {
+      type: new GraphQLNonNull(GraphQLString),
+      description: 'What to send back in the filters to accept the suggestion.',
+    },
+    label: { type: new GraphQLNonNull(GraphQLString), description: 'A readable name for it.' },
   },
 });
 
@@ -193,6 +237,10 @@ const SemanticSearchInterpretationType = new GraphQLObjectType({
     },
     warnings: {
       type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(SemanticSearchWarningType))),
+    },
+    suggestions: {
+      type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(SemanticSearchSuggestionType))),
+      description: `At most ${MAX_SUGGESTIONS} filters the query hints at, none of them applied.`,
     },
   },
 });
@@ -232,6 +280,10 @@ const SemanticSearchFacetsType = new GraphQLObjectType({
       type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(SemanticSearchFacetEntityType))),
       description:
         'Every entity that is the alleged deployer, developer or implicated system of an incident, ordered by name. Any of their ids can be passed in `excludeEntities`.',
+    },
+    mitRiskDomains: {
+      type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(GraphQLString))),
+      description: 'The MIT risk domains in their numbered order, as `mitRiskDomains` takes them.',
     },
   },
 });
@@ -546,11 +598,13 @@ const plainInterpretation = (query: string) => ({
   semanticText: query,
   constraints: [],
   warnings: [],
+  suggestions: [],
 });
 
 interface SemanticSearchFilters {
   excludeEntities?: string[] | null;
   excludeNames?: string[] | null;
+  mitRiskDomains?: string[] | null;
 }
 
 /**
@@ -590,6 +644,43 @@ const explicitExclusions = (filters: SemanticSearchFilters, facts: IncidentFacts
   return { constraints, warnings };
 };
 
+/** Keeps each known MIT risk domain in the filters once, and reports any other value. */
+const explicitMitDomains = (filters: SemanticSearchFilters, facts: IncidentFacts) => {
+  const constraints: Constraint[] = [];
+  const warnings: InterpretationWarning[] = [];
+
+  for (const domain of new Set(filters.mitRiskDomains ?? [])) {
+    if (facts.mitRiskDomains.includes(domain)) {
+      constraints.push({
+        kind: 'MIT_RISK_DOMAIN',
+        source: 'EXPLICIT_FILTER',
+        matchedText: domain,
+        mitRiskDomain: domain,
+      });
+    } else {
+      warnings.push({ code: 'UNKNOWN_MIT_DOMAIN', text: domain });
+    }
+  }
+
+  return { constraints, warnings };
+};
+
+/** The incidents a constraint applies to: those it removes, or those it keeps. */
+const incidentsOf = (constraint: Constraint, facts: IncidentFacts) =>
+  constraint.kind === 'MIT_RISK_DOMAIN'
+    ? facts.incidentsInMitDomains([constraint.mitRiskDomain])
+    : facts.incidentsWith(
+        constraint.entities.map((entity) => entity.entityId),
+        constraint.roles
+      );
+
+/**
+ * Constraints that keep incidents, grouped so that those in one group mean "any of these" and the
+ * groups mean "all of these". Exclusions keep nothing, so they have no group.
+ */
+const groupOf = (constraint: Constraint): string | null =>
+  constraint.kind === 'MIT_RISK_DOMAIN' ? 'mit' : null;
+
 /**
  * Keeps the first of any constraints that cover the same entities in the same way, so a page that
  * sends back the constraints it holds never gets one twice when the user types it again.
@@ -597,8 +688,16 @@ const explicitExclusions = (filters: SemanticSearchFilters, facts: IncidentFacts
 const withoutRepeats = (constraints: Constraint[]) => {
   const seen = new Set<string>();
 
-  return constraints.filter(({ kind, roles, entities }) => {
-    const key = JSON.stringify([kind, roles, entities.map((entity) => entity.entityId).sort()]);
+  return constraints.filter((constraint) => {
+    const key = JSON.stringify(
+      constraint.kind === 'MIT_RISK_DOMAIN'
+        ? [constraint.kind, constraint.mitRiskDomain]
+        : [
+            constraint.kind,
+            constraint.roles,
+            constraint.entities.map((entity) => entity.entityId).sort(),
+          ]
+    );
 
     if (seen.has(key)) return false;
 
@@ -615,21 +714,37 @@ const withoutRepeats = (constraints: Constraint[]) => {
 const interpret = (query: string, facts: IncidentFacts, filters: SemanticSearchFilters) => {
   const parsed = parseQuery(query, facts);
   const explicit = explicitExclusions(filters, facts);
+  const mit = explicitMitDomains(filters, facts);
 
   // Explicit filters come first, so the constraints a page sends back keep their order and newly
   // typed ones follow them.
-  const constraints = withoutRepeats([...explicit.constraints, ...parsed.constraints]);
-  const warnings = [...explicit.warnings, ...parsed.warnings];
+  const constraints = withoutRepeats([
+    ...explicit.constraints,
+    ...mit.constraints,
+    ...parsed.constraints,
+  ]);
+  const warnings = [...explicit.warnings, ...mit.warnings, ...parsed.warnings];
+
+  // A domain already filtered on needs no suggestion.
+  const suggestions = parsed.suggestions
+    .filter((suggestion) => !filters.mitRiskDomains?.includes(suggestion.value))
+    .slice(0, MAX_SUGGESTIONS);
 
   const applied = constraints.map((constraint) => ({
     constraint,
-    incidents: facts.incidentsWith(
-      constraint.entities.map((entity) => entity.entityId),
-      constraint.roles
-    ),
+    incidents: incidentsOf(constraint, facts),
   }));
 
-  const excluded = new Set(applied.flatMap(({ incidents }) => Array.from(incidents)));
+  const excluded = new Set<number>();
+  const kept = new Map<string, Set<number>>();
+
+  for (const { constraint, incidents } of applied) {
+    const group = groupOf(constraint);
+    const target = group === null ? excluded : kept.get(group) ?? new Set<number>();
+
+    for (const incidentId of incidents) target.add(incidentId);
+    if (group !== null) kept.set(group, target);
+  }
 
   // Explicit filters are constraints taken out of the query too, so a query of filler words sent
   // with them leaves nothing to rank by meaning. Without constraints it is ranked as written.
@@ -638,21 +753,32 @@ const interpret = (query: string, facts: IncidentFacts, filters: SemanticSearchF
 
   const allowedIncidentIds =
     applied.length > 0
-      ? new Set(Array.from(facts.incidentIds).filter((incidentId) => !excluded.has(incidentId)))
+      ? new Set(
+          Array.from(facts.incidentIds).filter(
+            (incidentId) =>
+              !excluded.has(incidentId) &&
+              Array.from(kept.values()).every((incidents) => incidents.has(incidentId))
+          )
+        )
       : undefined;
 
   const interpretation = {
     semanticText,
     warnings,
+    suggestions,
     constraints: applied.map(({ constraint, incidents }) => ({
       kind: constraint.kind,
       source: constraint.source,
       matchedText: constraint.matchedText,
-      entities: constraint.entities.map(({ entityId, name, matchedBy }) => ({
-        entity_id: entityId,
-        name,
-        matchedBy,
-      })),
+      entities:
+        constraint.kind === 'MIT_RISK_DOMAIN'
+          ? []
+          : constraint.entities.map(({ entityId, name, matchedBy }) => ({
+              entity_id: entityId,
+              name,
+              matchedBy,
+            })),
+      mitRiskDomain: constraint.kind === 'MIT_RISK_DOMAIN' ? constraint.mitRiskDomain : null,
       incidentCount: incidents.size,
     })),
   };
@@ -692,7 +818,7 @@ export const queryFields: GraphQLFieldConfigMap<any, Context> = {
         );
       }
 
-      if (!query && entityFilterCount === 0) {
+      if (!query && entityFilterCount === 0 && !filters.mitRiskDomains?.length) {
         return { ...noResults('OK'), interpretation: plainInterpretation(query) };
       }
 
@@ -735,6 +861,7 @@ export const queryFields: GraphQLFieldConfigMap<any, Context> = {
             entity_id: entityId,
             name,
           })),
+          mitRiskDomains: facts.mitRiskDomains,
         };
       } catch (error) {
         Sentry.captureException(error);

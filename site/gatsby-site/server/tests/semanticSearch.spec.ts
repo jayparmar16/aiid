@@ -1100,6 +1100,230 @@ describe('semanticSearch exclusions', () => {
     });
   });
 
+  describe('MIT risk domains', () => {
+    const DOMAINS = [
+      '1. Discrimination and Toxicity',
+      '2. Privacy & Security',
+      '3. Misinformation',
+      '4. Malicious Actors & Misuse',
+      '5. Human-Computer Interaction',
+      '6. Socioeconomic & Environmental Harms',
+      '7. AI system safety, failures, and limitations',
+    ];
+
+    const classification = (incidentId: number, domain: string, publish = true) => ({
+      namespace: 'MIT',
+      publish,
+      incidents: [incidentId],
+      attributes: [
+        { short_name: 'Intent', value_json: JSON.stringify('2 - Unintentional') },
+        { short_name: 'Risk Domain', value_json: JSON.stringify(domain) },
+      ],
+    });
+
+    const searchMit = (
+      query: string,
+      filters: { excludeEntities?: string[]; excludeNames?: string[]; mitRiskDomains?: string[] }
+    ) =>
+      makeRequest(url, {
+        query: `
+          query SemanticSearch($query: String!, $filters: SemanticSearchFilters) {
+            semanticSearch(query: $query, filters: $filters) {
+              status
+              totalCount
+              results { score incident { incident_id } }
+              interpretation {
+                semanticText
+                constraints {
+                  kind
+                  source
+                  matchedText
+                  mitRiskDomain
+                  incidentCount
+                  entities { entity_id }
+                }
+                warnings { code text }
+                suggestions { kind value label }
+              }
+            }
+          }
+        `,
+        variables: { query, filters },
+      });
+
+    const suggestionsOf = (response: any) => interpretationOf(response).suggestions;
+
+    const suggestedValues = (response: any) =>
+      suggestionsOf(response).map((suggestion: any) => suggestion.value);
+
+    beforeEach(async () => {
+      await seedCollection({
+        name: 'taxa',
+        docs: [
+          {
+            namespace: 'MIT',
+            field_list: [
+              { short_name: 'Intent', permitted_values: ['1 - Intentional', '2 - Unintentional'] },
+              { short_name: 'Risk Domain', permitted_values: DOMAINS },
+            ],
+          },
+          // Other taxonomies are never read.
+          {
+            namespace: 'CSETv1',
+            field_list: [{ short_name: 'Risk Domain', permitted_values: ['Not MIT'] }],
+          },
+        ],
+      });
+
+      // 13 has only an unpublished classification and 15 only a CSETv1 one, so neither matches.
+      await seedCollection({
+        name: 'classifications',
+        docs: [
+          classification(10, DOMAINS[6]),
+          classification(11, DOMAINS[6]),
+          classification(12, DOMAINS[6]),
+          classification(14, DOMAINS[1]),
+          classification(13, DOMAINS[2], false),
+          { ...classification(15, DOMAINS[2]), namespace: 'CSETv1' },
+        ],
+      });
+    });
+
+    it('keeps incidents with any of the domains and removes exclusions from them', async () => {
+      embedAs([1, 0]);
+
+      const response = await searchMit('crashes', {
+        mitRiskDomains: [DOMAINS[6], DOMAINS[2]],
+        excludeNames: ['tesla'],
+      });
+
+      expect(response.body.errors).toBeUndefined();
+      expect(embedded).toEqual(['crashes']);
+      expect(interpretationOf(response).constraints).toEqual([
+        expect.objectContaining({ kind: 'EXCLUDE_ENTITY', mitRiskDomain: null }),
+        {
+          kind: 'MIT_RISK_DOMAIN',
+          source: 'EXPLICIT_FILTER',
+          matchedText: DOMAINS[6],
+          mitRiskDomain: DOMAINS[6],
+          incidentCount: 3,
+          entities: [],
+        },
+        {
+          kind: 'MIT_RISK_DOMAIN',
+          source: 'EXPLICIT_FILTER',
+          matchedText: DOMAINS[2],
+          mitRiskDomain: DOMAINS[2],
+          incidentCount: 0,
+          entities: [],
+        },
+      ]);
+      expect(resultIds(response)).toEqual([12]);
+    });
+
+    it('lists the incidents of the domains newest first when nothing else is asked', async () => {
+      embedAs([1, 0]);
+
+      const response = await searchMit('', { mitRiskDomains: [DOMAINS[1], DOMAINS[6]] });
+
+      expect(response.body.errors).toBeUndefined();
+      expect(embedded).toEqual([]);
+      expect(interpretationOf(response).semanticText).toBe('');
+      expect(resultIds(response)).toEqual([11, 14, 10, 12]);
+      expect(response.body.data.semanticSearch.totalCount).toBe(4);
+    });
+
+    it('reports unknown values without applying them or counting them as entity filters', async () => {
+      embedAs([1, 0]);
+
+      const entityIds = Array.from({ length: 20 }, (_, index) => `entity-${index}`);
+
+      const response = await searchMit('crashes', {
+        excludeEntities: entityIds,
+        mitRiskDomains: ['Misinformation', 'Not MIT', DOMAINS[1]],
+      });
+
+      expect(response.body.errors).toBeUndefined();
+      expect(interpretationOf(response).warnings).toEqual([
+        ...entityIds.map((text) => ({ code: 'UNKNOWN_ENTITY', text })),
+        { code: 'UNKNOWN_MIT_DOMAIN', text: 'Misinformation' },
+        { code: 'UNKNOWN_MIT_DOMAIN', text: 'Not MIT' },
+      ]);
+      expect(interpretationOf(response).constraints).toEqual([
+        expect.objectContaining({ mitRiskDomain: DOMAINS[1], incidentCount: 1 }),
+      ]);
+      // 14 is the only incident in the domain, and it scores below the minimum.
+      expect(resultIds(response)).toEqual([]);
+    });
+
+    it('suggests the domains a query names without filtering on them', async () => {
+      embedAs([1, 0]);
+
+      const response = await searchMit('Privacy failures and misinformation', {});
+
+      expect(response.body.errors).toBeUndefined();
+      expect(embedded).toEqual(['Privacy failures and misinformation']);
+      expect(interpretationOf(response).constraints).toEqual([]);
+      expect(suggestionsOf(response)).toEqual([
+        { kind: 'MIT_RISK_DOMAIN', value: DOMAINS[1], label: 'Privacy & Security' },
+        {
+          kind: 'MIT_RISK_DOMAIN',
+          value: DOMAINS[6],
+          label: 'AI system safety, failures, and limitations',
+        },
+        { kind: 'MIT_RISK_DOMAIN', value: DOMAINS[2], label: 'Misinformation' },
+      ]);
+      expect(resultIds(response)).toEqual([10, 11, 12, 13, 15]);
+    });
+
+    it('suggests a domain only for a whole idea from its name, folding plurals', async () => {
+      embedAs([1, 0]);
+
+      const ideas = {
+        // Everyday words from the names suggest nothing on their own.
+        'an ai system harms actors in a human computer game': [],
+        'safety of an ai system': [],
+        'malicious actor deepfakes': [DOMAINS[3]],
+        'human-computer interactions with chatbots': [DOMAINS[4]],
+        'environmental harm from data centres': [DOMAINS[5]],
+        'ai systems safety': [DOMAINS[6]],
+      };
+
+      for (const [query, expected] of Object.entries(ideas)) {
+        const response = await searchMit(query, {});
+
+        expect({ query, suggested: suggestedValues(response) }).toEqual({
+          query,
+          suggested: expected,
+        });
+      }
+    });
+
+    it('caps suggestions at three, skipping filtered domains and excluded words', async () => {
+      embedAs([1, 0]);
+
+      const query = 'discrimination, privacy, misinformation and misuse';
+
+      expect(suggestedValues(await searchMit(query, {}))).toEqual(DOMAINS.slice(0, 3));
+      expect(suggestedValues(await searchMit(query, { mitRiskDomains: [DOMAINS[0]] }))).toEqual(
+        DOMAINS.slice(1, 4)
+      );
+      expect(suggestedValues(await searchMit('chatbots excluding misinformation', {}))).toEqual([]);
+    });
+
+    it('lists the seven domains in the facets, in their numbered order', async () => {
+      global.fetch = jest.fn();
+
+      const response = await makeRequest(url, {
+        query: `query SemanticSearchFacets { semanticSearchFacets { mitRiskDomains } }`,
+      });
+
+      expect(response.body.errors).toBeUndefined();
+      expect(response.body.data.semanticSearchFacets.mitRiskDomains).toEqual(DOMAINS);
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+  });
+
   describe('linked entities', () => {
     const link = (sub: string, obj: string, is_symmetric = true) => ({
       sub,

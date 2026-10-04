@@ -20,6 +20,7 @@ export const SEMANTIC_SEARCH = gql(`
           kind
           source
           matchedText
+          mitRiskDomain
           incidentCount
           entities {
             entity_id
@@ -30,6 +31,11 @@ export const SEMANTIC_SEARCH = gql(`
         warnings {
           code
           text
+        }
+        suggestions {
+          kind
+          value
+          label
         }
       }
     }
@@ -43,6 +49,7 @@ export const SEMANTIC_SEARCH_FACETS = gql(`
         entity_id
         name
       }
+      mitRiskDomains
     }
   }
 `);

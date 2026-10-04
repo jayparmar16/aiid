@@ -8,6 +8,7 @@ import SemanticSearchTable from '../../components/semanticSearch/SemanticSearchT
 import ExcelExport from '../../components/semanticSearch/ExcelExport';
 import SearchInterpretation from '../../components/semanticSearch/SearchInterpretation';
 import OrganisationFilter from '../../components/semanticSearch/OrganisationFilter';
+import MitRiskDomainFilter from '../../components/semanticSearch/MitRiskDomainFilter';
 import { SEMANTIC_SEARCH } from '../../graphql/semanticSearch';
 
 const exampleQueries = [
@@ -16,28 +17,39 @@ const exampleQueries = [
   'autonomous vehicle crashes involving pedestrians',
 ];
 
+const isMitChip = ({ filter }) => Boolean(filter.mitRiskDomain);
+
 /**
  * Sends each chip's filter back with the next search. A typed exclusion is held by the words that
  * named it, which the search reads again exactly as typed, so it keeps every entity it covered.
+ * MIT risk domains are sent only when there are some, so other searches ask exactly what they did.
  */
-const filtersFor = (chips) => ({
-  excludeEntities: chips.flatMap(({ filter }) => (filter.id ? [filter.id] : [])),
-  excludeNames: chips.flatMap(({ filter }) => (filter.name ? [filter.name] : [])),
-});
+const filtersFor = (chips) => {
+  const mitRiskDomains = chips.filter(isMitChip).map(({ filter }) => filter.mitRiskDomain);
+
+  return {
+    excludeEntities: chips.flatMap(({ filter }) => (filter.id ? [filter.id] : [])),
+    excludeNames: chips.flatMap(({ filter }) => (filter.name ? [filter.name] : [])),
+    ...(mitRiskDomains.length > 0 && { mitRiskDomains }),
+  };
+};
+
+// What an explicit constraint echoes as its matched text: the name, id or MIT domain it was sent as.
+const isHeldBy = (filter, constraint) =>
+  isMitChip({ filter }) === (constraint.kind === 'MIT_RISK_DOMAIN') &&
+  constraint.matchedText === (filter.name ?? filter.id ?? filter.mitRiskDomain);
 
 /**
- * Pairs each exclusion a search applied with the filter that brings it back. An explicit one
- * echoes the name or id it was sent as its matched text, so held chips keep their filter and their
- * place, and a held filter that matches nothing any more is dropped. Newly typed ones follow, held
- * by their matched text.
+ * Pairs each constraint a search applied with the filter that brings it back. An explicit one
+ * echoes the name, id or MIT domain it was sent as its matched text, so held chips keep their filter
+ * and their place, and a held filter that matches nothing any more is dropped. Newly typed ones
+ * follow, held by their matched text.
  */
 const chipsFrom = (constraints, held) => {
   const explicit = constraints.filter((constraint) => constraint.source === 'EXPLICIT_FILTER');
 
   const kept = held.flatMap(({ filter }) => {
-    const index = explicit.findIndex(
-      (constraint) => constraint.matchedText === (filter.name ?? filter.id)
-    );
+    const index = explicit.findIndex((constraint) => isHeldBy(filter, constraint));
 
     return index < 0 ? [] : [{ filter, constraint: explicit.splice(index, 1)[0] }];
   });
@@ -62,7 +74,7 @@ export default function SemanticSearchPage() {
 
   const [submitted, setSubmitted] = useState('');
 
-  // The exclusions of the latest search, shown as removable chips and sent with the next one.
+  // The constraints of the latest search, shown as removable chips and sent with the next one.
   const [chips, setChips] = useState([]);
 
   const [search, { data, loading, error }] = useLazyQuery(SEMANTIC_SEARCH);
@@ -110,6 +122,12 @@ export default function SemanticSearchPage() {
     const remaining = chips.filter((chip) => chip.constraint !== removed);
 
     runSearch(input, remaining);
+  };
+
+  const acceptSuggestion = (suggestion) => {
+    if (suggestion.kind === 'MIT_RISK_DOMAIN') {
+      runSearch(input, [...chips, { filter: { mitRiskDomain: suggestion.value } }]);
+    }
   };
 
   // A chip picked from the organisation control has no constraint until its search returns.
@@ -162,6 +180,12 @@ export default function SemanticSearchPage() {
         </form>
 
         <OrganisationFilter
+          chips={chips.filter((chip) => !isMitChip(chip))}
+          disabled={loading}
+          onChange={(next) => runSearch(input, [...next, ...chips.filter(isMitChip)])}
+        />
+
+        <MitRiskDomainFilter
           chips={chips}
           disabled={loading}
           onChange={(next) => runSearch(input, next)}
@@ -175,7 +199,9 @@ export default function SemanticSearchPage() {
             semanticText={response?.interpretation.semanticText}
             constraints={constraints}
             warnings={response?.interpretation.warnings}
+            suggestions={response?.interpretation.suggestions}
             onRemove={removeConstraint}
+            onAccept={acceptSuggestion}
           />
         )}
 
