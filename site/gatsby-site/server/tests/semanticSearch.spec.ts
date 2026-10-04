@@ -853,6 +853,99 @@ describe('semanticSearch exclusions', () => {
     expect(embedded).toEqual(['crashes']);
   });
 
+  describe('semanticSearchFacets', () => {
+    const facets = () =>
+      makeRequest(url, {
+        query: `
+          query SemanticSearchFacets {
+            semanticSearchFacets {
+              responsibleEntities { entity_id name }
+            }
+          }
+        `,
+      });
+
+    const responsibleEntities = (response: any) =>
+      response.body.data.semanticSearchFacets.responsibleEntities;
+
+    it('lists every named entity responsible for an incident, by name, without embedding', async () => {
+      global.fetch = jest.fn();
+
+      await seedCollection({
+        name: 'entities',
+        docs: [{ entity_id: 'never-involved', name: 'Never Involved' }],
+        drop: false,
+      });
+      await seedCollection({
+        name: 'incidents',
+        docs: [incident(16, 'An entity without a record', { deployer: ['nameless'] })],
+        drop: false,
+      });
+
+      const response = await facets();
+
+      expect(response.body.errors).toBeUndefined();
+      // Tesla drivers are only ever harmed, so they are never offered as an organisation.
+      expect(responsibleEntities(response)).toEqual([
+        { entity_id: 'clearview-ai', name: 'Clearview AI' },
+        { entity_id: 'students', name: 'Students' },
+        { entity_id: 'tesla', name: 'Tesla' },
+        { entity_id: 'tesla-autopilot', name: 'Tesla Autopilot' },
+        { entity_id: 'tesla-full-self-driving-(fsd)', name: 'Tesla Full Self-Driving (FSD)' },
+        { entity_id: 'uber', name: 'Uber' },
+        { entity_id: 'waymo', name: 'Waymo' },
+      ]);
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it('offers only entities a search can exclude by id', async () => {
+      embedAs([1, 0]);
+
+      const ids = responsibleEntities(await facets()).map((entity: any) => entity.entity_id);
+
+      for (const id of ids) {
+        const response = await search('crashes', { filters: { excludeEntities: [id] } });
+
+        expect(interpretationOf(response).warnings).toEqual([]);
+        expect(interpretationOf(response).constraints).toEqual([
+          expect.objectContaining({ source: 'EXPLICIT_FILTER', matchedText: id }),
+        ]);
+      }
+    });
+
+    it('requires a logged-in account', async () => {
+      mockAnonymousSession();
+
+      const response = await facets();
+
+      expect(response.body.errors[0]).toMatchObject({ extensions: { code: API_LOGIN_REQUIRED } });
+    });
+
+    it('keeps its entities until the cache is reset, then lists new ones', async () => {
+      const before = responsibleEntities(await facets());
+
+      await seedCollection({
+        name: 'entities',
+        docs: [{ entity_id: 'nova', name: 'Nova' }],
+        drop: false,
+      });
+      await seedCollection({
+        name: 'incidents',
+        docs: [incident(16, 'Nova robotaxi stalls', { deployer: ['nova'] })],
+        drop: false,
+      });
+
+      expect(responsibleEntities(await facets())).toEqual(before);
+
+      resetSemanticSearchCache();
+
+      expect(responsibleEntities(await facets())).toContainEqual({
+        entity_id: 'nova',
+        name: 'Nova',
+      });
+    });
+  });
+
   describe('linked entities', () => {
     const link = (sub: string, obj: string, is_symmetric = true) => ({
       sub,

@@ -34,3 +34,14 @@ export const SEMANTIC_SEARCH = gql(`
     }
   }
 `);
+
+export const SEMANTIC_SEARCH_FACETS = gql(`
+  query SemanticSearchFacets {
+    semanticSearchFacets {
+      responsibleEntities {
+        entity_id
+        name
+      }
+    }
+  }
+`);

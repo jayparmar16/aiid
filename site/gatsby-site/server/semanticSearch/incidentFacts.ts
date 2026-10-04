@@ -19,6 +19,8 @@ export interface IncidentFacts extends Vocabulary {
   incidentsWith: (entityIds: readonly string[], roles: readonly EntityRole[]) => Set<number>;
   /** The entity's name, or undefined when no entity with a usable name has that id. */
   nameOf: (entityId: string) => string | undefined;
+  /** Every named entity that occurs in a responsible role, ordered by name. */
+  responsibleEntities: readonly { entityId: string; name: string }[];
 }
 
 const containsSequence = (words: readonly string[], sequence: readonly string[]) => {
@@ -176,5 +178,9 @@ export const loadIncidentFacts = async (client: MongoClient): Promise<IncidentFa
 
   const nameOf = (entityId: string) => names.get(entityId);
 
-  return { incidentIds, incidentsWith, nameOf, resolve, longestNameWords };
+  const responsibleEntities = Array.from(wordsById.keys())
+    .map((entityId) => ({ entityId, name: names.get(entityId)! }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+
+  return { incidentIds, incidentsWith, nameOf, resolve, longestNameWords, responsibleEntities };
 };

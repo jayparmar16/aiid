@@ -7,6 +7,7 @@ import { ApiAccessGate } from '../../components/ui/ApiLoginRequired';
 import SemanticSearchTable from '../../components/semanticSearch/SemanticSearchTable';
 import ExcelExport from '../../components/semanticSearch/ExcelExport';
 import SearchInterpretation from '../../components/semanticSearch/SearchInterpretation';
+import OrganisationFilter from '../../components/semanticSearch/OrganisationFilter';
 import { SEMANTIC_SEARCH } from '../../graphql/semanticSearch';
 
 const exampleQueries = [
@@ -111,6 +112,9 @@ export default function SemanticSearchPage() {
     runSearch(input, remaining);
   };
 
+  // A chip picked from the organisation control has no constraint until its search returns.
+  const constraints = chips.flatMap((chip) => (chip.constraint ? [chip.constraint] : []));
+
   return (
     <div className="w-full">
       <h1 className="text-2xl font-semibold mb-2">
@@ -157,13 +161,19 @@ export default function SemanticSearchPage() {
           </Button>
         </form>
 
+        <OrganisationFilter
+          chips={chips}
+          disabled={loading}
+          onChange={(next) => runSearch(input, next)}
+        />
+
         {loading && <Spinner />}
 
         {/* Shown with every status, so a refused search still says how the query was read. */}
         {!loading && (
           <SearchInterpretation
             semanticText={response?.interpretation.semanticText}
-            constraints={chips.map((chip) => chip.constraint)}
+            constraints={constraints}
             warnings={response?.interpretation.warnings}
             onRemove={removeConstraint}
           />

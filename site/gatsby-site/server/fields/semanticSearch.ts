@@ -209,6 +209,26 @@ const SemanticSearchResponseType = new GraphQLObjectType({
   },
 });
 
+const SemanticSearchFacetEntityType = new GraphQLObjectType({
+  name: 'SemanticSearchFacetEntity',
+  fields: {
+    entity_id: { type: new GraphQLNonNull(GraphQLString) },
+    name: { type: new GraphQLNonNull(GraphQLString) },
+  },
+});
+
+const SemanticSearchFacetsType = new GraphQLObjectType({
+  name: 'SemanticSearchFacets',
+  description: 'The values a search can be filtered on, for building filter controls.',
+  fields: {
+    responsibleEntities: {
+      type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(SemanticSearchFacetEntityType))),
+      description:
+        'Every entity that is the alleged deployer, developer or implicated system of an incident, ordered by name. Any of their ids can be passed in `excludeEntities`.',
+    },
+  },
+});
+
 export interface CachedIncidentVectors {
   incidentId: number;
   overview: Float32Array;
@@ -625,10 +645,34 @@ export const queryFields: GraphQLFieldConfigMap<any, Context> = {
       return { ...response, interpretation };
     },
   },
+  semanticSearchFacets: {
+    type: new GraphQLNonNull(SemanticSearchFacetsType),
+    description: 'The values semantic search can be filtered on.',
+    resolve: async (_source, _args, context) => {
+      try {
+        const facts = await cachedFacts(FACTS_CACHE_KEY, () => loadIncidentFacts(context.client));
+
+        return {
+          responsibleEntities: facts.responsibleEntities.map(({ entityId, name }) => ({
+            entity_id: entityId,
+            name,
+          })),
+        };
+      } catch (error) {
+        Sentry.captureException(error);
+
+        // Returned rather than thrown, so the permissions layer does not mask it as "not authorised".
+        return new GraphQLError('Search filters are unavailable right now.', {
+          extensions: { code: 'INTERNAL_SERVER_ERROR' },
+        });
+      }
+    },
+  },
 };
 
 export const permissions = {
   Query: {
     semanticSearch: allow,
+    semanticSearchFacets: allow,
   },
 };

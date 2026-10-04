@@ -539,4 +539,156 @@ test.describe('Semantic Search', () => {
     await expect(exclusion).toContainText('2 entities · 22 incidents');
     await expect(input).toHaveValue('chatbot failures');
   });
+
+  test('excludes organisations picked from the control, which shares its chips with the query', async ({
+    page,
+    login,
+  }) => {
+    await login({ customData: { roles: ['subscriber'] } });
+
+    const facets = {
+      data: {
+        semanticSearchFacets: {
+          responsibleEntities: [
+            { entity_id: 'tesla', name: 'Tesla' },
+            { entity_id: 'tesla-autopilot', name: 'Tesla Autopilot' },
+            { entity_id: 'uber', name: 'Uber' },
+            { entity_id: 'waymo', name: 'Waymo' },
+          ],
+        },
+      },
+    };
+
+    const uber = (source: string) => ({
+      kind: 'EXCLUDE_ENTITY',
+      source,
+      matchedText: 'uber',
+      incidentCount: 12,
+      entities: [{ entity_id: 'uber', name: 'Uber', matchedBy: 'NAME' }],
+    });
+
+    // A picked organisation is sent by id, which its constraint echoes, and covers its family.
+    const tesla = {
+      kind: 'EXCLUDE_ENTITY',
+      source: 'EXPLICIT_FILTER',
+      matchedText: 'tesla',
+      incidentCount: 50,
+      entities: [
+        { entity_id: 'tesla', name: 'Tesla', matchedBy: 'NAME' },
+        { entity_id: 'tesla-autopilot', name: 'Tesla Autopilot', matchedBy: 'FAMILY' },
+      ],
+    };
+
+    const readAs = (constraints: unknown[]) => ({
+      semanticText: 'self-driving crashes',
+      constraints,
+      warnings: [],
+    });
+
+    const replies = [
+      readAs([uber('QUERY_TEXT')]),
+      readAs([tesla, uber('EXPLICIT_FILTER')]),
+      readAs([tesla]),
+      readAs([]),
+    ];
+    const requests: unknown[] = [];
+    let facetRequests = 0;
+
+    await page.route('**/graphql', async (route) => {
+      const request = route.request().postDataJSON();
+
+      if (request.operationName === 'SemanticSearchFacets') {
+        facetRequests += 1;
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(facets),
+        });
+        return;
+      }
+
+      if (request.operationName !== 'SemanticSearch') {
+        await route.continue();
+        return;
+      }
+
+      requests.push(request.variables);
+
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(response('OK', results.slice(0, 2), replies[requests.length - 1])),
+      });
+    });
+
+    await page.goto(url);
+
+    const input = page.locator('[data-cy="semantic-search-input"]');
+    const exclusion = page.locator('[data-cy="semantic-search-exclusion"]');
+    const control = page.locator('[data-cy="semantic-search-organisations"]');
+    const organisation = page.locator('#semantic-search-exclude-organisations');
+    const tokens = control.locator('.rbt-token');
+    const option = (name: string) =>
+      page.locator(
+        `#semantic-search-exclude-organisations-tags .dropdown-item[aria-label="${name}"]`
+      );
+
+    await input.fill('self-driving crashes excluding uber');
+    await page.locator('[data-cy="semantic-search-submit"]').click();
+
+    // A typed exclusion shows up in the control as well as in the chips.
+    await expect(exclusion).toHaveCount(1);
+    await expect(tokens).toHaveCount(1);
+    await expect(tokens).toContainText('Uber');
+
+    await organisation.fill('tes');
+    await option('Tesla').click();
+
+    await expect(exclusion).toHaveCount(2);
+    await expect(exclusion.filter({ hasText: 'Excluding: Tesla' })).toContainText(
+      '2 entities · 50 incidents'
+    );
+    await expect(tokens).toHaveCount(2);
+    await expect(input).toHaveValue('self-driving crashes');
+
+    // Tesla Autopilot is already excluded with Tesla, so it is no longer offered.
+    await organisation.fill('a');
+    await expect(option('Waymo')).toBeVisible();
+    await expect(option('Tesla')).toHaveCount(0);
+    await expect(option('Tesla Autopilot')).toHaveCount(0);
+    await organisation.fill('');
+
+    // Removing from the control removes the chip too, and removing a chip clears the control.
+    await tokens.filter({ hasText: 'Uber' }).locator('.rbt-token-remove-button').click();
+
+    await expect(exclusion).toHaveCount(1);
+    await expect(exclusion).toContainText('Excluding: Tesla');
+    await expect(tokens).toHaveCount(1);
+
+    await exclusion.locator('[data-cy="semantic-search-remove-constraint"]').click();
+
+    await expect(exclusion).toHaveCount(0);
+    await expect(tokens).toHaveCount(0);
+
+    await expect
+      .poll(() => requests)
+      .toEqual([
+        {
+          query: 'self-driving crashes excluding uber',
+          filters: { excludeEntities: [], excludeNames: [] },
+        },
+        {
+          query: 'self-driving crashes',
+          filters: { excludeEntities: ['tesla'], excludeNames: ['uber'] },
+        },
+        {
+          query: 'self-driving crashes',
+          filters: { excludeEntities: ['tesla'], excludeNames: [] },
+        },
+        { query: 'self-driving crashes', filters: { excludeEntities: [], excludeNames: [] } },
+      ]);
+
+    // The options are loaded once, however many searches follow.
+    expect(facetRequests).toBe(1);
+  });
 });
