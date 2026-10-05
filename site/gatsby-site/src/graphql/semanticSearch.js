@@ -20,6 +20,7 @@ export const SEMANTIC_SEARCH = gql(`
           kind
           source
           matchedText
+          mitRiskDomain
           incidentCount
           dateFrom
           dateTo
@@ -32,6 +33,11 @@ export const SEMANTIC_SEARCH = gql(`
         warnings {
           code
           text
+        }
+        suggestions {
+          kind
+          value
+          label
         }
       }
     }
@@ -47,6 +53,7 @@ export const SEMANTIC_SEARCH_FACETS = gql(`
       }
       earliestDate
       latestDate
+      mitRiskDomains
     }
   }
 `);

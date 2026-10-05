@@ -3,6 +3,8 @@ import { useTranslation } from 'react-i18next';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faXmark } from '@fortawesome/free-solid-svg-icons';
 import DateRangeChip from './DateRangeChip';
+import MitRiskDomainChip from './MitRiskDomainChip';
+import SuggestionChip from './SuggestionChip';
 
 // Spells out "1 entity" or "6 entities", since these strings have no plural translations.
 const counted = (t, count, one, many) => (count === 1 ? t(one) : t(many, { count }));
@@ -49,23 +51,26 @@ function ExclusionChip({ constraint, onRemove }) {
   );
 }
 
-// The chip for each kind of constraint that is not an exclusion.
-const chipsByKind = { DATE_RANGE: DateRangeChip };
+// The chip for each kind of constraint. Exclusions were the first kind, so they are the default.
+const chips = { DATE_RANGE: DateRangeChip, MIT_RISK_DOMAIN: MitRiskDomainChip };
 
 /**
  * Shows how a query was read: the part ranked by meaning, each constraint applied to the results,
- * and anything that could not be applied. Each constraint can be removed, which searches again
- * without it. A query without constraints needs no explanation.
+ * filters the query hints at, and anything that could not be applied. Each constraint can be
+ * removed and each suggestion accepted, which searches again. A query without any of these needs
+ * no explanation.
  */
 export default function SearchInterpretation({
   semanticText,
   constraints,
   warnings = [],
+  suggestions = [],
   onRemove,
+  onAccept,
 }) {
   const { t } = useTranslation();
 
-  if (constraints.length === 0 && warnings.length === 0) return null;
+  if (constraints.length === 0 && warnings.length === 0 && suggestions.length === 0) return null;
 
   return (
     <div className="mb-4" data-cy="semantic-search-interpretation">
@@ -79,15 +84,26 @@ export default function SearchInterpretation({
           </span>
         )}
         {constraints.map((constraint, index) => {
-          const Chip = chipsByKind[constraint.kind] ?? ExclusionChip;
+          const Chip = chips[constraint.kind] ?? ExclusionChip;
 
           return <Chip key={index} constraint={constraint} onRemove={() => onRemove(constraint)} />;
         })}
+        {suggestions.map((suggestion) => (
+          <SuggestionChip
+            key={`${suggestion.kind}:${suggestion.value}`}
+            suggestion={suggestion}
+            onAccept={() => onAccept(suggestion)}
+          />
+        ))}
       </div>
       {warnings.map((warning, index) => (
         <p key={index} className="mt-2 text-sm text-amber-700" data-cy="semantic-search-warning">
           {warning.code === 'INVALID_DATE'
             ? t('Could not filter by “{{text}}”: dates are written as YYYY-MM-DD.', {
+                text: warning.text,
+              })
+            : warning.code === 'UNKNOWN_MIT_DOMAIN'
+            ? t('Could not filter to “{{text}}”: it is not an MIT risk domain.', {
                 text: warning.text,
               })
             : warning.code === 'UNKNOWN_ENTITY'

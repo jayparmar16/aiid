@@ -69,7 +69,11 @@ const buildColumns = (origin) => [
 
 // Readable names for the constraint kinds and sources the page knows. Anything else is written as
 // the API names it, so constraints added to the search later still export.
-const kindLabels = { EXCLUDE_ENTITY: 'Excluding', DATE_RANGE: 'Date range' };
+const kindLabels = {
+  EXCLUDE_ENTITY: 'Excluding',
+  DATE_RANGE: 'Date range',
+  MIT_RISK_DOMAIN: 'MIT risk domain',
+};
 
 const sourceLabels = { QUERY_TEXT: 'Query text' };
 
