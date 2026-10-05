@@ -926,6 +926,8 @@ test.describe('Semantic Search', () => {
     const query = 'election misinformation';
     const noEntities = { excludeEntities: [], excludeNames: [] };
 
+    // Unticking the last domain searches with the first search's variables again, which Apollo's
+    // cache answers without another request.
     await expect
       .poll(() => requests)
       .toEqual([
@@ -933,7 +935,6 @@ test.describe('Semantic Search', () => {
         { query, filters: { ...noEntities, mitRiskDomains: [misinformation] } },
         { query, filters: { ...noEntities, mitRiskDomains: [misinformation, privacy] } },
         { query, filters: { ...noEntities, mitRiskDomains: [privacy] } },
-        { query, filters: noEntities },
       ]);
   });
 

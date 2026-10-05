@@ -1,217 +1,215 @@
-import { startStandaloneServer } from '@apollo/server/standalone';
-import { schema } from '../schema';
-import { MongoClient, ObjectId } from 'mongodb';
-import { ApolloServer } from '@apollo/server';
+import { startStandaloneServer } from "@apollo/server/standalone";
+import { schema } from "../schema";
+import { MongoClient, ObjectId } from "mongodb";
+import { ApolloServer } from "@apollo/server";
 import config from '../config';
 import supertest from 'supertest';
 import * as context from '../context';
-import { User } from '../generated/graphql';
-import { apiUsagePlugin } from '../apiUsage';
-import { clearApiAccessCache } from '../apiAccess';
+import { User } from "../generated/graphql";
+import { apiUsagePlugin } from "../apiUsage";
+import { clearApiAccessCache } from "../apiAccess";
 
 export const getClient = () => {
-  const client = new MongoClient(process.env.API_MONGODB_CONNECTION_STRING!);
 
-  return client;
-};
+    const client = new MongoClient(process.env.API_MONGODB_CONNECTION_STRING!);
+
+    return client;
+}
 
 export const startTestServer = async () => {
-  const client = getClient();
 
-  const server = new ApolloServer({
-    schema,
-    // Mirrors the plugin list of the Netlify lambda so usage accounting is
-    // covered by the same tests that cover the fields it counts.
-    // SEE: netlify/functions/graphql.ts
-    plugins: [apiUsagePlugin(client)],
-  });
+    const client = getClient();
 
-  const { url } = await startStandaloneServer(server, {
-    context: ({ req }) => context.context({ req, client }),
-    listen: { port: 0 },
-  });
+    const server = new ApolloServer({
+        schema,
+        // Mirrors the plugin list of the Netlify lambda so usage accounting is
+        // covered by the same tests that cover the fields it counts.
+        // SEE: netlify/functions/graphql.ts
+        plugins: [apiUsagePlugin(client)],
+    });
 
-  return { server, url };
-};
+    const { url } = await startStandaloneServer(server, { context: ({ req }) => context.context({ req, client }), listen: { port: 0 } });
 
-export const seedCollection = async ({
-  name,
-  docs,
-  database = 'aiidprod',
-  drop = true,
-}: {
-  name: string;
-  database?: string;
-  docs: Record<string, unknown>[];
-  drop?: boolean;
-}) => {
-  const client = new MongoClient(process.env.API_MONGODB_CONNECTION_STRING!);
+    return { server, url }
+}
 
-  // Closed afterwards: a spec that seeds in every test would otherwise run out of connections.
-  try {
-    const db = client.db(database);
-    const collection = db.collection(name);
+export const seedCollection = async ({ name, docs, database = 'aiidprod', drop = true }: { name: string, database?: string, docs: Record<string, unknown>[], drop?: boolean }) => {
 
-    if (drop && (await db.listCollections().toArray()).find((c) => c.name === name)) {
-      await collection.drop();
+    const client = new MongoClient(process.env.API_MONGODB_CONNECTION_STRING!);
+
+    // Closed afterwards: a spec that seeds in every test would otherwise run out of connections.
+    try {
+
+        const db = client.db(database);
+        const collection = db.collection(name);
+
+        if (drop && (await db.listCollections().toArray()).find(c => c.name === name)) {
+
+            await collection.drop();
+        }
+
+        if (docs.length) {
+
+            const result = await collection.insertMany(docs);
+
+            return result;
+        }
+    }
+    finally {
+
+        await client.close();
+    }
+}
+
+export const makeRequest = async (url: string, data: { query: string, variables?: Record<string, unknown> }, headers?: Record<string, string>) => {
+
+    const request = supertest(url).post('/')
+
+    if (headers) {
+
+        request.set(headers)
     }
 
-    if (docs.length) {
-      const result = await collection.insertMany(docs);
-
-      return result;
-    }
-  } finally {
-    await client.close();
-  }
-};
-
-export const makeRequest = async (
-  url: string,
-  data: { query: string; variables?: Record<string, unknown> },
-  headers?: Record<string, string>
-) => {
-  const request = supertest(url).post('/');
-
-  if (headers) {
-    request.set(headers);
-  }
-
-  return request.send(data);
-};
+    return request.send(data);
+}
 
 type DeepPartial<T> = T extends object ? { [P in keyof T]?: DeepPartial<T[P]> } : T;
 
 export interface Fixture<T, U, I = any> {
-  name: string;
-  fieldName?: string;
-  query: string;
-  seeds: { [database: string]: { [collection: string]: Record<string, unknown>[] } };
-  testSingular: {
-    allowed: User[];
-    denied: User[];
-    filter: unknown;
-    result: DeepPartial<T>;
-  } | null;
-  testPluralFilter: {
-    allowed: User[];
-    denied: User[];
-    filter: unknown;
-    result: DeepPartial<T>[];
-  } | null;
-  testPluralSort: {
-    allowed: User[];
-    denied: User[];
-    sort: unknown;
-    filter?: unknown;
-    result: DeepPartial<T>[];
-  } | null;
-  testPluralPagination: {
-    allowed: User[];
-    denied: User[];
-    pagination: { limit: number; skip: number };
-    sort: unknown;
-    result: DeepPartial<T>[];
-  } | null;
-  testUpdateOne: {
-    allowed: User[];
-    denied: User[];
-    filter: unknown;
-    update: U;
-    result: DeepPartial<T>;
-  } | null;
-  testUpdateMany: {
-    allowed: User[];
-    denied: User[];
-    filter: { [key: string]: unknown };
-    update: U;
-    result: { modifiedCount: number; matchedCount: number };
-  } | null;
-  testInsertOne: {
-    allowed: User[];
-    denied: User[];
-    insert: I;
-    result: DeepPartial<T>;
-  } | null;
-  testInsertMany: {
-    allowed: User[];
-    denied: User[];
-    insert: I[];
-    result: { insertedIds: string[] };
-  } | null;
-  testDeleteOne: {
-    allowed: User[];
-    denied: User[];
-    filter: { _id: { EQ: ObjectId } };
-    result: { _id: string };
-  } | null;
-  testDeleteMany: {
-    allowed: User[];
-    denied: User[];
-    filter: { [key: string]: unknown };
-    result: { deletedCount: number };
-  } | null;
-  testUpsertOne: {
-    shouldUpdate: {
-      allowed: User[];
-      denied: User[];
-      filter: unknown;
-      update: I;
-      result: DeepPartial<T>;
-    };
-    shouldInsert: {
-      allowed: User[];
-      denied: User[];
-      filter: unknown;
-      update: I;
-      result: DeepPartial<T>;
-    };
-  } | null;
+    name: string;
+    fieldName?: string ;
+    query: string;
+    seeds: { [database: string]: { [collection: string]: Record<string, unknown>[] } };
+    testSingular: {
+        allowed: User[];
+        denied: User[];
+        filter: unknown;
+        result: DeepPartial<T>;
+    } | null;
+    testPluralFilter: {
+        allowed: User[];
+        denied: User[];
+        filter: unknown;
+        result: DeepPartial<T>[];
+    } | null;
+    testPluralSort: {
+        allowed: User[];
+        denied: User[];
+        sort: unknown;
+        filter?: unknown;
+        result: DeepPartial<T>[];
+    } | null;
+    testPluralPagination: {
+        allowed: User[];
+        denied: User[];
+        pagination: { limit: number; skip: number };
+        sort: unknown;
+        result: DeepPartial<T>[];
+    } | null;
+    testUpdateOne: {
+        allowed: User[];
+        denied: User[];
+        filter: unknown;
+        update: U;
+        result: DeepPartial<T>;
+    } | null;
+    testUpdateMany: {
+        allowed: User[];
+        denied: User[];
+        filter: { [key: string]: unknown };
+        update: U;
+        result: { modifiedCount: number; matchedCount: number };
+    } | null;
+    testInsertOne: {
+        allowed: User[];
+        denied: User[];
+        insert: I;
+        result: DeepPartial<T>;
+    } | null;
+    testInsertMany: {
+        allowed: User[];
+        denied: User[];
+        insert: I[];
+        result: { insertedIds: string[] };
+    } | null;
+    testDeleteOne: {
+        allowed: User[];
+        denied: User[];
+        filter: { _id: { EQ: ObjectId } };
+        result: { _id: string };
+    } | null;
+    testDeleteMany: {
+        allowed: User[];
+        denied: User[];
+        filter: { [key: string]: unknown };
+        result: { deletedCount: number };
+    } | null;
+    testUpsertOne: {
+        shouldUpdate: {
+            allowed: User[];
+            denied: User[];
+            filter: unknown;
+            update: I;
+            result: DeepPartial<T>;
+        },
+        shouldInsert: {
+            allowed: User[];
+            denied: User[];
+            filter: unknown;
+            update: I;
+            result: DeepPartial<T>;
+        },
+    } | null;
 }
 
-export const seedFixture = async (
-  seeds: Record<string, Record<string, Record<string, unknown>[]>>
-) => {
-  for (const [database, collection] of Object.entries(seeds)) {
-    for (const [name, docs] of Object.entries(collection)) {
-      await seedCollection({ database, name, docs });
+export const seedFixture = async (seeds: Record<string, Record<string, Record<string, unknown>[]>>) => {
+
+    for (const [database, collection] of Object.entries(seeds)) {
+
+        for (const [name, docs] of Object.entries(collection)) {
+
+            await seedCollection({ database, name, docs, });
+        }
     }
-  }
-};
+}
 
 export const mockSession = (userId: string) => {
-  const client = getClient();
 
-  const db = client.db('customData');
-  const collection = db.collection('users');
+    const client = getClient();
 
-  // The API access gate caches each account's blocked flag for a few seconds
-  // (SEE: server/apiAccess.ts). Tests seed and re-seed that flag far faster
-  // than the TTL, so the cache is dropped whenever the acting user changes.
-  clearApiAccessCache();
+    const db = client.db('customData');
+    const collection = db.collection('users');
 
-  jest.spyOn(context, 'verifyToken').mockImplementation(async () => {
-    const user = await collection.findOne<{ userId: string; roles: string[] }>({ userId: userId });
+    // The API access gate caches each account's blocked flag for a few seconds
+    // (SEE: server/apiAccess.ts). Tests seed and re-seed that flag far faster
+    // than the TTL, so the cache is dropped whenever the acting user changes.
+    clearApiAccessCache();
 
-    return user ? { id: user.userId, roles: user.roles } : null;
-  });
-};
+    jest.spyOn(context, 'verifyToken').mockImplementation(async () => {
+
+        const user = await collection.findOne<{ userId: string, roles: string[] }>({ userId: userId });
+
+        return user ? { id: user.userId, roles: user.roles } : null;
+    })
+}
 
 /**
  * Simulates a request with no session, so the API access gate rejects it.
  * SEE: server/apiAccess.ts
  */
 export const mockAnonymousSession = () => {
-  clearApiAccessCache();
 
-  jest.spyOn(context, 'verifyToken').mockImplementation(async () => null);
-};
+    clearApiAccessCache();
+
+    jest.spyOn(context, 'verifyToken').mockImplementation(async () => null);
+}
 
 export const getCollection = (databaseName: string, collectionName: string) => {
-  const client = getClient();
-  const collection = client.db(databaseName).collection(collectionName);
 
-  return collection;
-};
+    const client = getClient();
+    const collection = client.db(databaseName).collection(collectionName);
+
+    return collection;
+}
 
 export const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
