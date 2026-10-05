@@ -2,9 +2,19 @@ import React from 'react';
 import { usePagination, useSortBy, useTable } from 'react-table';
 import { useTranslation } from 'react-i18next';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
-import { faSort, faSortDown, faSortUp } from '@fortawesome/free-solid-svg-icons';
+import {
+  faImage,
+  faQuestionCircle,
+  faSort,
+  faSortDown,
+  faSortUp,
+} from '@fortawesome/free-solid-svg-icons';
+import { Tooltip } from 'flowbite-react';
+import { fill } from '@cloudinary/base/actions/resize';
+import md5 from 'md5';
 import Link from 'components/ui/Link';
 import Table, { formatDateField } from 'components/ui/Table';
+import { Image } from 'utils/cloudinary';
 
 // Orders scores as numbers, since the default alphanumeric sort misorders decimals. Results
 // listed by date have no score: they stay below scored ones and in the order they came, newest
@@ -32,7 +42,7 @@ function SortHeader({ column }) {
     <button
       type="button"
       {...column.getSortByToggleProps()}
-      className="flex items-center gap-1 uppercase text-left"
+      className="flex items-center gap-1 whitespace-nowrap uppercase text-left"
     >
       {column.title}
       {column.canSort && <FontAwesomeIcon icon={icon} className="text-gray-400" />}
@@ -40,9 +50,77 @@ function SortHeader({ column }) {
   );
 }
 
+// The score header adds a hint on what a good score is. The hint sits outside the sort button, so
+// hovering or clicking it never changes the order.
+function ScoreHeader({ column }) {
+  const { t } = useTranslation();
+
+  return (
+    <div className="flex items-center gap-1">
+      <SortHeader column={column} />
+      <Tooltip
+        content={
+          <span className="whitespace-nowrap normal-case">
+            {t('0.4–1.0: closely matches what you described')}
+          </span>
+        }
+      >
+        <button
+          type="button"
+          aria-label={t('What is a good score?')}
+          className="cursor-help text-gray-400"
+          data-cy="semantic-search-score-help"
+        >
+          <FontAwesomeIcon icon={faQuestionCircle} />
+        </button>
+      </Tooltip>
+    </div>
+  );
+}
+
+// The incident's picture, from its earliest report that has one, the way incident cards choose it.
+const imageOf = (reports) => {
+  const report = [...(reports ?? [])]
+    .sort((left, right) => left.report_number - right.report_number)
+    .find((report) => report.cloudinary_id || report.image_url);
+
+  if (!report) return null;
+
+  return report.cloudinary_id || `legacy/${md5(report.image_url)}`;
+};
+
+// A small thumbnail linking to the incident, or a plain box of the same size when it has no image.
+function ImageCell({ row }) {
+  const { t } = useTranslation();
+
+  const { incident_id, title, reports } = row.original;
+
+  const publicID = imageOf(reports);
+
+  return (
+    <Link to={`/cite/${incident_id}`} className="block w-24" data-cy="semantic-search-image">
+      {publicID ? (
+        <Image
+          publicID={publicID}
+          transformation={fill().width(192).height(108)}
+          alt={title}
+          itemIdentifier={t('Incident {{id}}', { id: incident_id }).replace(' ', '.')}
+          className="rounded"
+          height={108}
+        />
+      ) : (
+        <div className="flex aspect-[16/9] w-full items-center justify-center rounded bg-gray-100 text-gray-300 dark:bg-gray-700">
+          <FontAwesomeIcon icon={faImage} />
+        </div>
+      )}
+    </Link>
+  );
+}
+
 /**
  * Lists search results with sortable columns and pagination, rendered through the shared Table.
- * Rows start sorted by score, best match first. Unscored results keep the order the search gave.
+ * Each row starts with the incident's picture and ends with its score. Rows start sorted by score,
+ * best match first. Unscored results keep the order the search gave.
  */
 export default function SemanticSearchTable({ results }) {
   const { t } = useTranslation();
@@ -52,29 +130,42 @@ export default function SemanticSearchTable({ results }) {
     [results]
   );
 
+  // The short columns shrink to their content, so the title and description get the room.
   const columns = React.useMemo(
     () => [
       {
-        title: t('Score'),
-        accessor: 'score',
-        sortType: byScore,
-        sortDescFirst: true,
-        // A dash rather than a blank, so a result listed by date doesn't read as a weak match.
-        Cell: ({ value }) => (value == null ? '—' : value.toFixed(3)),
+        id: 'image',
+        width: 1,
+        title: '',
+        Header: () => <span className="sr-only">{t('Image')}</span>,
+        disableSortBy: true,
+        Cell: ImageCell,
       },
       {
         title: t('Incident ID'),
         accessor: 'incident_id',
+        width: 1,
         sortType: 'basic',
         Cell: ({ value }) => <Link to={`/cite/${value}`}>{value}</Link>,
       },
       {
         title: t('Date'),
         accessor: 'date',
-        Cell: ({ value }) => formatDateField(value),
+        width: 1,
+        Cell: ({ value }) => <span className="whitespace-nowrap">{formatDateField(value)}</span>,
       },
-      { title: t('Title'), accessor: 'title' },
-      { title: t('Description'), accessor: 'description', disableSortBy: true },
+      { title: t('Title'), accessor: 'title', width: 180 },
+      { title: t('Description'), accessor: 'description', width: 280, disableSortBy: true },
+      {
+        title: t('Score'),
+        accessor: 'score',
+        width: 1,
+        sortType: byScore,
+        sortDescFirst: true,
+        Header: ScoreHeader,
+        // A dash rather than a blank, so a result listed by date doesn't read as a weak match.
+        Cell: ({ value }) => (value == null ? '—' : value.toFixed(3)),
+      },
     ],
     [t]
   );

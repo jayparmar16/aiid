@@ -40,6 +40,14 @@ const results = Array.from({ length: 30 }, (_, index) => ({
     title: `Incident ${index + 1}`,
     date: '2026-01-01',
     description: index === 0 ? 'Description, "quoted"\nline' : `Description ${index + 1}`,
+    // Only the first incident has a picture, on its second report.
+    reports:
+      index === 0
+        ? [
+            { report_number: 2, cloudinary_id: 'reports/example.jpg', image_url: '' },
+            { report_number: 1, cloudinary_id: '', image_url: '' },
+          ]
+        : [],
   },
 }));
 
@@ -108,7 +116,23 @@ test.describe('Semantic Search', () => {
     await login({ customData: { roles: ['subscriber'] } });
 
     const queries: string[] = [];
+    const sentFilters: unknown[] = [];
     let releaseFirstRequest: (() => void) | undefined;
+
+    // The second example's exclusion becomes a chip, which the third example must not inherit.
+    const excludingTesla = {
+      semanticText: 'self-driving crashes',
+      constraints: [
+        {
+          kind: 'EXCLUDE_ENTITY',
+          source: 'QUERY_TEXT',
+          matchedText: 'tesla',
+          incidentCount: 50,
+          entities: [{ entity_id: 'tesla', name: 'Tesla', matchedBy: 'NAME' }],
+        },
+      ],
+      warnings: [],
+    };
 
     await page.route('**/graphql', async (route) => {
       const request = route.request().postDataJSON();
@@ -119,6 +143,7 @@ test.describe('Semantic Search', () => {
       }
 
       queries.push(request.variables.query);
+      sentFilters.push(request.variables.filters);
 
       if (queries.length === 1) {
         await new Promise<void>((resolve) => {
@@ -129,11 +154,22 @@ test.describe('Semantic Search', () => {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify(response('OK', queries.length === 1 ? results : [])),
+        body: JSON.stringify(
+          queries.length === 1
+            ? response('OK', results)
+            : response('OK', [], queries.length === 2 ? excludingTesla : unconstrained)
+        ),
       });
     });
 
     await page.goto(url);
+
+    // A short legend of the words the search reads as filters.
+    const legend = page.locator('[data-cy="semantic-search-legend"]');
+
+    for (const word of ['excluding', 'by', 'affecting', 'against', 'since / before']) {
+      await expect(legend).toContainText(word);
+    }
 
     const examples = page.locator('[data-cy="semantic-search-examples"] button');
 
@@ -154,12 +190,33 @@ test.describe('Semantic Search', () => {
     await expect(page.locator('[data-cy="row"]').first()).toContainText('Incident 1');
     await expect(page.locator('[data-cy="total-pages"]')).toHaveText('2');
 
+    // Each row starts with the incident's picture, or a plain box when it has none, and ends
+    // with its score.
+    const firstRow = page.locator('[data-cy="row"]').first();
+    await expect(
+      firstRow.locator('[data-cy="cell"]').first().locator('[data-cy="cloudinary-image-wrapper"]')
+    ).toHaveCount(1);
+    await expect(firstRow.locator('[data-cy="semantic-search-image"]')).toHaveAttribute(
+      'href',
+      /\/cite\/1\/?$/
+    );
+    await expect(
+      page
+        .locator('[data-cy="row"]')
+        .nth(1)
+        .locator('[data-cy="semantic-search-image"] [data-cy="cloudinary-image-wrapper"]')
+    ).toHaveCount(0);
+    await expect(firstRow.locator('[data-cy="cell"]').last()).toHaveText('0.300');
+
+    await page.locator('[data-cy="semantic-search-score-help"]').hover();
+    await expect(page.getByText('0.4–1.0: closely matches what you described')).toBeVisible();
+
     await page.locator('[data-cy="last-page"]').click();
     await expect(page.locator('[data-cy="row"]')).toHaveCount(5);
     await expect(page.locator('[data-cy="row"]').first()).toContainText('Incident 26');
 
     await page.locator('[data-cy="first-page"]').click();
-    await page.locator('[data-cy="header-score"] button').click();
+    await page.locator('[data-cy="header-score"] button').first().click();
     await expect(page.locator('[data-cy="row"]').first()).toContainText('Incident 30');
 
     const csvDownloadPromise = page.waitForEvent('download');
@@ -187,15 +244,19 @@ test.describe('Semantic Search', () => {
     await expect(page.locator('[data-cy="semantic-search-export-error"]')).toBeVisible();
 
     await page.locator('[data-cy="semantic-search-example-2"]').click();
-    await expect(page.locator('[data-cy="semantic-search-empty"]')).toBeVisible();
+    await expect(page.locator('[data-cy="semantic-search-exclusion"]')).toContainText(
+      'Excluding: Tesla'
+    );
     await page.locator('[data-cy="semantic-search-example-3"]').click();
     await expect(page.locator('[data-cy="semantic-search-empty"]')).toBeVisible();
+    await expect(page.locator('[data-cy="semantic-search-exclusion"]')).toHaveCount(0);
 
     expect(queries).toEqual([
       'deepfake related incidents',
-      'facial recognition leading to a wrongful arrest',
-      'autonomous vehicle crashes involving pedestrians',
+      'self-driving crashes excluding tesla',
+      'lawsuits against openai since 2023',
     ]);
+    expect(sentFilters[2]).toEqual({ excludeEntities: [], excludeNames: [] });
   });
 
   test('shows empty, quota, and unavailable states for submitted searches', async ({
@@ -736,7 +797,10 @@ test.describe('Semantic Search', () => {
       { incident_id: 7, title: 'Newest incident', date: '2025-06-01' },
       { incident_id: 5, title: 'Middle incident', date: '2023-02-01' },
       { incident_id: 9, title: 'Oldest incident', date: '2019-11-01' },
-    ].map((incident) => ({ score: null, incident: { ...incident, description: incident.title } }));
+    ].map((incident) => ({
+      score: null,
+      incident: { ...incident, description: incident.title, reports: [] },
+    }));
 
     await page.route('**/graphql', async (route) => {
       const request = route.request().postDataJSON();
@@ -773,14 +837,14 @@ test.describe('Semantic Search', () => {
 
       for (const [index, title] of ['Newest', 'Middle', 'Oldest'].entries()) {
         await expect(rows.nth(index)).toContainText(`${title} incident`);
-        await expect(rows.nth(index).locator('[data-cy="cell"]').first()).toHaveText('—');
+        await expect(rows.nth(index).locator('[data-cy="cell"]').last()).toHaveText('—');
       }
     };
 
     await expectNewestFirst();
 
     // Sorting by score in either direction leaves unscored results in the order they came.
-    await page.locator('[data-cy="header-score"] button').click();
+    await page.locator('[data-cy="header-score"] button').first().click();
     await expectNewestFirst();
 
     const csvDownloadPromise = page.waitForEvent('download');

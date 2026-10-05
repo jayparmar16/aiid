@@ -15,8 +15,18 @@ import { SEMANTIC_SEARCH } from '../../graphql/semanticSearch';
 
 const exampleQueries = [
   'deepfake related incidents',
-  'facial recognition leading to a wrongful arrest',
-  'autonomous vehicle crashes involving pedestrians',
+  'self-driving crashes excluding tesla',
+  'lawsuits against openai since 2023',
+];
+
+// The words the search reads as filters, each with what it does. The words stay untranslated,
+// since the search reads them in English.
+const legend = [
+  ['excluding', 'drops an organisation'],
+  ['by', 'made or used by'],
+  ['affecting', 'who was harmed'],
+  ['against', 'harmed group or company'],
+  ['since / before', 'limits the dates'],
 ];
 
 const RESPONSIBLE_ROLES = ['DEPLOYER', 'DEVELOPER', 'IMPLICATED'];
@@ -223,12 +233,13 @@ export default function SemanticSearchPage() {
           <span className="text-sm text-gray-600">
             <Trans>Try an example:</Trans>
           </span>
+          {/* An example starts fresh, so filters held from an earlier search don't change it. */}
           {exampleQueries.map((query, index) => (
             <button
               key={query}
               type="button"
               disabled={loading}
-              onClick={() => runSearch(query, chips)}
+              onClick={() => runSearch(query, [])}
               className="rounded-full border border-blue-300 px-3 py-1 text-sm text-blue-700 hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
               data-cy={`semantic-search-example-${index + 1}`}
             >
@@ -250,6 +261,17 @@ export default function SemanticSearchPage() {
             <Trans>Search</Trans>
           </Button>
         </form>
+
+        <p
+          className="-mt-2 mb-4 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500"
+          data-cy="semantic-search-legend"
+        >
+          {legend.map(([word, meaning]) => (
+            <span key={word}>
+              <span className="font-semibold text-gray-700">{word}</span> {t(meaning)}
+            </span>
+          ))}
+        </p>
 
         <OrganisationFilter chips={entityChips} disabled={loading} onChange={changeEntities} />
 
