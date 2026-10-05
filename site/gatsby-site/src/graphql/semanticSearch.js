@@ -20,6 +20,7 @@ export const SEMANTIC_SEARCH = gql(`
           kind
           source
           matchedText
+          roles
           incidentCount
           entities {
             entity_id
@@ -31,6 +32,11 @@ export const SEMANTIC_SEARCH = gql(`
           code
           text
         }
+        suggestions {
+          kind
+          value
+          label
+        }
       }
     }
   }
@@ -40,6 +46,10 @@ export const SEMANTIC_SEARCH_FACETS = gql(`
   query SemanticSearchFacets {
     semanticSearchFacets {
       responsibleEntities {
+        entity_id
+        name
+      }
+      harmedEntities {
         entity_id
         name
       }

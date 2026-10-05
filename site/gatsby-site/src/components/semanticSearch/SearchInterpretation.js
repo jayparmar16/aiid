@@ -2,26 +2,14 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faXmark } from '@fortawesome/free-solid-svg-icons';
-
-// Spells out "1 entity" or "6 entities", since these strings have no plural translations.
-const counted = (t, count, one, many) => (count === 1 ? t(one) : t(many, { count }));
-
-// Marks entities covered through an editor's link rather than the written name, which would
-// otherwise look out of place in the list (Facebook under "Excluding: Meta").
-const entityList = (t, entities) =>
-  entities
-    .map((entity) =>
-      entity.matchedBy === 'LINK' ? t('{{name}} (linked)', { name: entity.name }) : entity.name
-    )
-    .join(', ');
+import InclusionChip from './InclusionChip';
+import { constraintName, counted, entityList } from './constraintText';
 
 /** One exclusion, labelled with the entity whose name was written, listing every entity it covers. */
 function ExclusionChip({ constraint, onRemove }) {
   const { t } = useTranslation();
 
-  const named = constraint.entities.find((entity) => entity.matchedBy === 'NAME');
-
-  const name = named?.name ?? constraint.matchedText;
+  const name = constraintName(constraint);
 
   return (
     <span
@@ -47,6 +35,20 @@ function ExclusionChip({ constraint, onRemove }) {
     </span>
   );
 }
+
+// The chip for each kind of constraint.
+const chips = {
+  EXCLUDE_ENTITY: ExclusionChip,
+  INCLUDE_ENTITY: InclusionChip,
+  HARMED_PARTY: InclusionChip,
+};
+
+// Why a filter could not be applied, by warning code. Anything else is an unrecognised exclusion.
+const warningTexts = {
+  UNKNOWN_ENTITY: 'Could not filter by “{{text}}”: no organisation, system or group has that id.',
+  UNRECOGNISED_INCLUSION:
+    'Could not filter by “{{text}}”: nothing involved in an incident has that name.',
+};
 
 /**
  * Shows how a query was read: the part ranked by meaning, each constraint applied to the results,
@@ -74,23 +76,19 @@ export default function SearchInterpretation({
             {t('Searching: {{text}}', { text: semanticText })}
           </span>
         )}
-        {constraints.map((constraint, index) => (
-          <ExclusionChip
-            key={index}
-            constraint={constraint}
-            onRemove={() => onRemove(constraint)}
-          />
-        ))}
+        {constraints.map((constraint, index) => {
+          const Chip = chips[constraint.kind] ?? ExclusionChip;
+
+          return <Chip key={index} constraint={constraint} onRemove={() => onRemove(constraint)} />;
+        })}
       </div>
       {warnings.map((warning, index) => (
         <p key={index} className="mt-2 text-sm text-amber-700" data-cy="semantic-search-warning">
-          {warning.code === 'UNKNOWN_ENTITY'
-            ? t('Could not exclude “{{text}}”: no organisation or system has that id.', {
-                text: warning.text,
-              })
-            : t('Could not exclude “{{text}}”: no organisation or system has that name.', {
-                text: warning.text,
-              })}
+          {t(
+            warningTexts[warning.code] ??
+              'Could not exclude “{{text}}”: no organisation or system has that name.',
+            { text: warning.text }
+          )}
         </p>
       ))}
     </div>

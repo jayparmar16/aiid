@@ -9,13 +9,26 @@ const url = '/apps/semantic-search/';
 // The API returns an interpretation with every status. A query without constraints has nothing in it.
 const unconstrained = { semanticText: '', constraints: [], warnings: [] };
 
+// Fills in the fields a mock leaves out because its test isn't about them. Apollo drops a reply
+// that lacks a field the page asked for.
+const withDefaults = (interpretation: any) => ({
+  suggestions: [],
+  ...interpretation,
+  constraints: interpretation.constraints.map((constraint: any) => ({
+    roles: null,
+    ...constraint,
+  })),
+});
+
 const response = (
   status: string,
   results: unknown[] = [],
   interpretation: unknown = unconstrained,
   totalCount = results.length
 ) => ({
-  data: { semanticSearch: { status, totalCount, results, interpretation } },
+  data: {
+    semanticSearch: { status, totalCount, results, interpretation: withDefaults(interpretation) },
+  },
 });
 
 const results = Array.from({ length: 30 }, (_, index) => ({
@@ -556,6 +569,7 @@ test.describe('Semantic Search', () => {
             { entity_id: 'uber', name: 'Uber' },
             { entity_id: 'waymo', name: 'Waymo' },
           ],
+          harmedEntities: [],
         },
       },
     };
@@ -776,5 +790,316 @@ test.describe('Semantic Search', () => {
     const workbook = readWorkbook(await readFile((await (await xlsxDownloadPromise).path())!));
 
     expect(workbook.Results[1].slice(0, 2)).toEqual(['', '7']);
+  });
+
+  test('holds inclusions and affected parties as chips and sends them back with their roles', async ({
+    page,
+    login,
+  }) => {
+    await login({ customData: { roles: ['subscriber'] } });
+
+    const developedByGoogle = {
+      kind: 'INCLUDE_ENTITY',
+      source: 'QUERY_TEXT',
+      matchedText: 'google',
+      roles: ['DEVELOPER'],
+      incidentCount: 96,
+      entities: [
+        { entity_id: 'google', name: 'Google', matchedBy: 'NAME' },
+        { entity_id: 'google-bard', name: 'Google Bard', matchedBy: 'FAMILY' },
+      ],
+    };
+
+    const affectingStudents = {
+      kind: 'HARMED_PARTY',
+      source: 'QUERY_TEXT',
+      matchedText: 'students',
+      roles: ['HARMED'],
+      incidentCount: 99,
+      entities: [
+        { entity_id: 'students', name: 'Students', matchedBy: 'NAME' },
+        { entity_id: 'university-students', name: 'University students', matchedBy: 'FAMILY' },
+      ],
+    };
+
+    const readAs = (constraints: unknown[]) => ({
+      semanticText: 'chatbot failures',
+      constraints,
+      warnings: [],
+    });
+
+    const replies = [
+      readAs([developedByGoogle, affectingStudents]),
+      readAs([{ ...developedByGoogle, source: 'EXPLICIT_FILTER' }]),
+    ];
+    const requests: unknown[] = [];
+
+    await page.route('**/graphql', async (route) => {
+      const request = route.request().postDataJSON();
+
+      if (request.operationName !== 'SemanticSearch') {
+        await route.continue();
+        return;
+      }
+
+      requests.push(request.variables);
+
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(response('OK', results.slice(0, 2), replies[requests.length - 1])),
+      });
+    });
+
+    await page.goto(url);
+
+    const input = page.locator('[data-cy="semantic-search-input"]');
+    const inclusion = page.locator('[data-cy="semantic-search-inclusion"]');
+    const affectedParty = page.locator('[data-cy="semantic-search-affected-party"]');
+    const included = page.locator('[data-cy="semantic-search-include-organisations"] .rbt-token');
+    const affected = page.locator('[data-cy="semantic-search-affected-parties"] .rbt-token');
+
+    await input.fill('chatbot failures developed by google affecting students');
+    await page.locator('[data-cy="semantic-search-submit"]').click();
+
+    await expect(inclusion).toHaveCount(1);
+    await expect(inclusion).toContainText('Developed by: Google');
+    await expect(inclusion).toContainText('2 entities · 96 incidents');
+    await expect(affectedParty).toContainText('Affecting: Students');
+    await expect(input).toHaveValue('chatbot failures');
+
+    // Typed constraints show up in the controls too, a role-specific one with its role.
+    await expect(included).toHaveCount(1);
+    await expect(included).toContainText('Google (developer)');
+    await expect(affected).toHaveCount(1);
+    await expect(affected).toContainText('Students');
+
+    await affectedParty.locator('[data-cy="semantic-search-remove-constraint"]').click();
+
+    await expect
+      .poll(() => requests)
+      .toEqual([
+        {
+          query: 'chatbot failures developed by google affecting students',
+          filters: { excludeEntities: [], excludeNames: [] },
+        },
+        {
+          query: 'chatbot failures',
+          filters: {
+            excludeEntities: [],
+            excludeNames: [],
+            include: [{ name: 'google', roles: ['DEVELOPER'] }],
+          },
+        },
+      ]);
+    await expect(affectedParty).toHaveCount(0);
+    await expect(affected).toHaveCount(0);
+    await expect(inclusion).toContainText('Developed by: Google');
+  });
+
+  test('applies a suggested organisation when clicked, and stops suggesting it', async ({
+    page,
+    login,
+  }) => {
+    await login({ customData: { roles: ['subscriber'] } });
+
+    const query = 'tesla autopilot crashes';
+
+    const replies = [
+      {
+        semanticText: query,
+        constraints: [],
+        warnings: [],
+        suggestions: [
+          { kind: 'INCLUDE_ENTITY', value: 'tesla-autopilot', label: 'Tesla Autopilot' },
+        ],
+      },
+      {
+        semanticText: query,
+        constraints: [
+          {
+            kind: 'INCLUDE_ENTITY',
+            source: 'EXPLICIT_FILTER',
+            matchedText: 'tesla-autopilot',
+            roles: ['DEPLOYER', 'DEVELOPER', 'IMPLICATED'],
+            incidentCount: 30,
+            entities: [
+              { entity_id: 'tesla-autopilot', name: 'Tesla Autopilot', matchedBy: 'NAME' },
+            ],
+          },
+        ],
+        warnings: [],
+        suggestions: [],
+      },
+    ];
+    const requests: unknown[] = [];
+
+    await page.route('**/graphql', async (route) => {
+      const request = route.request().postDataJSON();
+
+      if (request.operationName !== 'SemanticSearch') {
+        await route.continue();
+        return;
+      }
+
+      requests.push(request.variables);
+
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(response('OK', results.slice(0, 2), replies[requests.length - 1])),
+      });
+    });
+
+    await page.goto(url);
+
+    const input = page.locator('[data-cy="semantic-search-input"]');
+    const suggestion = page.locator('[data-cy="semantic-search-suggestion"]');
+
+    await input.fill(query);
+    await page.locator('[data-cy="semantic-search-submit"]').click();
+
+    await expect(suggestion).toHaveText(['Only incidents involving Tesla Autopilot?']);
+    // A mention stays part of the meaning, so the box keeps it.
+    await expect(input).toHaveValue(query);
+
+    await suggestion.click();
+
+    await expect(page.locator('[data-cy="semantic-search-inclusion"]')).toContainText(
+      'Involving: Tesla Autopilot'
+    );
+    await expect(suggestion).toHaveCount(0);
+    await expect(input).toHaveValue(query);
+    expect(requests).toEqual([
+      { query, filters: { excludeEntities: [], excludeNames: [] } },
+      {
+        query,
+        filters: {
+          excludeEntities: [],
+          excludeNames: [],
+          include: [{ entityId: 'tesla-autopilot' }],
+        },
+      },
+    ]);
+  });
+
+  test('keeps organisations and affected parties picked from their controls', async ({
+    page,
+    login,
+  }) => {
+    await login({ customData: { roles: ['subscriber'] } });
+
+    const facets = {
+      data: {
+        semanticSearchFacets: {
+          responsibleEntities: [
+            { entity_id: 'openai', name: 'OpenAI' },
+            { entity_id: 'tesla', name: 'Tesla' },
+          ],
+          harmedEntities: [
+            { entity_id: 'students', name: 'Students' },
+            { entity_id: 'tesla-drivers', name: 'Tesla drivers' },
+          ],
+        },
+      },
+    };
+
+    const openai = {
+      kind: 'INCLUDE_ENTITY',
+      source: 'EXPLICIT_FILTER',
+      matchedText: 'openai',
+      roles: ['DEPLOYER', 'DEVELOPER', 'IMPLICATED'],
+      incidentCount: 166,
+      entities: [{ entity_id: 'openai', name: 'OpenAI', matchedBy: 'NAME' }],
+    };
+
+    const students = {
+      kind: 'HARMED_PARTY',
+      source: 'EXPLICIT_FILTER',
+      matchedText: 'students',
+      roles: ['HARMED'],
+      incidentCount: 99,
+      entities: [{ entity_id: 'students', name: 'Students', matchedBy: 'NAME' }],
+    };
+
+    const readAs = (constraints: unknown[]) => ({
+      semanticText: 'essay grading',
+      constraints,
+      warnings: [],
+    });
+
+    const replies = [readAs([]), readAs([openai]), readAs([openai, students])];
+    const requests: unknown[] = [];
+
+    await page.route('**/graphql', async (route) => {
+      const request = route.request().postDataJSON();
+
+      if (request.operationName === 'SemanticSearchFacets') {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(facets),
+        });
+        return;
+      }
+
+      if (request.operationName !== 'SemanticSearch') {
+        await route.continue();
+        return;
+      }
+
+      requests.push(request.variables);
+
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(response('OK', results.slice(0, 2), replies[requests.length - 1])),
+      });
+    });
+
+    await page.goto(url);
+
+    const option = (control: string, name: string) =>
+      page.locator(`#${control}-tags .dropdown-item[aria-label="${name}"]`);
+
+    await page.locator('[data-cy="semantic-search-input"]').fill('essay grading');
+    await page.locator('[data-cy="semantic-search-submit"]').click();
+    await expect(page.locator('[data-cy="semantic-search-count"]')).toBeVisible();
+
+    await page.locator('#semantic-search-include-organisations').fill('open');
+    await option('semantic-search-include-organisations', 'OpenAI').click();
+
+    await expect(page.locator('[data-cy="semantic-search-inclusion"]')).toContainText(
+      'Involving: OpenAI'
+    );
+
+    await page.locator('#semantic-search-affected-parties').fill('stud');
+    await option('semantic-search-affected-parties', 'Students').click();
+
+    await expect(page.locator('[data-cy="semantic-search-affected-party"]')).toContainText(
+      'Affecting: Students'
+    );
+    // Picking an organisation to keep leaves the exclusion control alone.
+    await expect(page.locator('[data-cy="semantic-search-organisations"] .rbt-token')).toHaveCount(
+      0
+    );
+
+    await expect
+      .poll(() => requests)
+      .toEqual([
+        { query: 'essay grading', filters: { excludeEntities: [], excludeNames: [] } },
+        {
+          query: 'essay grading',
+          filters: { excludeEntities: [], excludeNames: [], include: [{ entityId: 'openai' }] },
+        },
+        {
+          query: 'essay grading',
+          filters: {
+            excludeEntities: [],
+            excludeNames: [],
+            include: [{ entityId: 'openai' }, { entityId: 'students', roles: ['HARMED'] }],
+          },
+        },
+      ]);
   });
 });

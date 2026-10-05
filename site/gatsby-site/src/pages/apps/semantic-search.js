@@ -8,6 +8,9 @@ import SemanticSearchTable from '../../components/semanticSearch/SemanticSearchT
 import ExcelExport from '../../components/semanticSearch/ExcelExport';
 import SearchInterpretation from '../../components/semanticSearch/SearchInterpretation';
 import OrganisationFilter from '../../components/semanticSearch/OrganisationFilter';
+import AffectedPartyFilter from '../../components/semanticSearch/AffectedPartyFilter';
+import SuggestionChips from '../../components/semanticSearch/SuggestionChips';
+import { kindOf } from '../../components/semanticSearch/EntityFilter';
 import { SEMANTIC_SEARCH } from '../../graphql/semanticSearch';
 
 const exampleQueries = [
@@ -16,17 +19,51 @@ const exampleQueries = [
   'autonomous vehicle crashes involving pedestrians',
 ];
 
-/**
- * Sends each chip's filter back with the next search. A typed exclusion is held by the words that
- * named it, which the search reads again exactly as typed, so it keeps every entity it covered.
- */
-const filtersFor = (chips) => ({
-  excludeEntities: chips.flatMap(({ filter }) => (filter.id ? [filter.id] : [])),
-  excludeNames: chips.flatMap(({ filter }) => (filter.name ? [filter.name] : [])),
-});
+const RESPONSIBLE_ROLES = ['DEPLOYER', 'DEVELOPER', 'IMPLICATED'];
+
+const ENTITY_KINDS = ['EXCLUDE_ENTITY', 'INCLUDE_ENTITY', 'HARMED_PARTY'];
+
+const sameRoles = (left, right) =>
+  [...(left ?? [])].sort().join() === [...(right ?? [])].sort().join();
+
+/** An inclusion or affected party as the search takes it: by id or by name, with its roles. */
+const includeFilter = ({ filter, constraint }) => {
+  const roles = kindOf({ filter, constraint }) === 'HARMED_PARTY' ? ['HARMED'] : filter.roles;
+
+  return {
+    ...(filter.id ? { entityId: filter.id } : { name: filter.name }),
+    ...(roles && { roles }),
+  };
+};
 
 /**
- * Pairs each exclusion a search applied with the filter that brings it back. An explicit one
+ * Sends each chip's filter back with the next search. A typed constraint is held by the words that
+ * named it, which the search reads again exactly as typed, so it keeps every entity it covered.
+ */
+const filtersFor = (chips) => {
+  const ofKind = (kind) => chips.filter((chip) => kindOf(chip) === kind);
+
+  const exclusions = ofKind('EXCLUDE_ENTITY').map(({ filter }) => filter);
+
+  const include = [...ofKind('INCLUDE_ENTITY'), ...ofKind('HARMED_PARTY')].map(includeFilter);
+
+  return {
+    excludeEntities: exclusions.flatMap((filter) => (filter.id ? [filter.id] : [])),
+    excludeNames: exclusions.flatMap((filter) => (filter.name ? [filter.name] : [])),
+    // Left out when empty, so a search without inclusions sends exactly what it did before them.
+    ...(include.length > 0 && { include }),
+  };
+};
+
+/** Whether a constraint is the one a held chip's filter asked for. */
+const answers = (chip, constraint) =>
+  kindOf({ filter: chip.filter }) === constraint.kind &&
+  constraint.matchedText === (chip.filter.name ?? chip.filter.id) &&
+  (constraint.kind !== 'INCLUDE_ENTITY' ||
+    sameRoles(chip.filter.roles ?? RESPONSIBLE_ROLES, constraint.roles));
+
+/**
+ * Pairs each entity constraint a search applied with the filter that brings it back. An explicit one
  * echoes the name or id it was sent as its matched text, so held chips keep their filter and their
  * place, and a held filter that matches nothing any more is dropped. Newly typed ones follow, held
  * by their matched text.
@@ -34,19 +71,25 @@ const filtersFor = (chips) => ({
 const chipsFrom = (constraints, held) => {
   const explicit = constraints.filter((constraint) => constraint.source === 'EXPLICIT_FILTER');
 
-  const kept = held.flatMap(({ filter }) => {
-    const index = explicit.findIndex(
-      (constraint) => constraint.matchedText === (filter.name ?? filter.id)
-    );
+  const kept = held.flatMap((chip) => {
+    const index = explicit.findIndex((constraint) => answers(chip, constraint));
 
-    return index < 0 ? [] : [{ filter, constraint: explicit.splice(index, 1)[0] }];
+    return index < 0 ? [] : [{ filter: chip.filter, constraint: explicit.splice(index, 1)[0] }];
   });
 
+  // A typed inclusion keeps the roles its linking word gave it, such as "developed by".
   const typed = constraints
     .filter(
-      (constraint) => constraint.source === 'QUERY_TEXT' && constraint.kind === 'EXCLUDE_ENTITY'
+      (constraint) => constraint.source === 'QUERY_TEXT' && ENTITY_KINDS.includes(constraint.kind)
     )
-    .map((constraint) => ({ filter: { name: constraint.matchedText }, constraint }));
+    .map((constraint) => ({
+      filter: {
+        kind: constraint.kind,
+        name: constraint.matchedText,
+        ...(constraint.kind === 'INCLUDE_ENTITY' && { roles: constraint.roles }),
+      },
+      constraint,
+    }));
 
   return [...kept, ...typed];
 };
@@ -62,7 +105,7 @@ export default function SemanticSearchPage() {
 
   const [submitted, setSubmitted] = useState('');
 
-  // The exclusions of the latest search, shown as removable chips and sent with the next one.
+  // The constraints of the latest search, shown as removable chips and sent with the next one.
   const [chips, setChips] = useState([]);
 
   const [search, { data, loading, error }] = useLazyQuery(SEMANTIC_SEARCH);
@@ -112,7 +155,17 @@ export default function SemanticSearchPage() {
     runSearch(input, remaining);
   };
 
-  // A chip picked from the organisation control has no constraint until its search returns.
+  // Applying a suggestion adds the filter it offers, so the search keeps it from then on.
+  const acceptSuggestion = (suggestion) => {
+    if (suggestion.kind === 'INCLUDE_ENTITY') {
+      runSearch(input, [
+        ...chips,
+        { filter: { kind: 'INCLUDE_ENTITY', id: suggestion.value }, label: suggestion.label },
+      ]);
+    }
+  };
+
+  // A chip picked from a control has no constraint until its search returns.
   const constraints = chips.flatMap((chip) => (chip.constraint ? [chip.constraint] : []));
 
   return (
@@ -167,6 +220,12 @@ export default function SemanticSearchPage() {
           onChange={(next) => runSearch(input, next)}
         />
 
+        <AffectedPartyFilter
+          chips={chips}
+          disabled={loading}
+          onChange={(next) => runSearch(input, next)}
+        />
+
         {loading && <Spinner />}
 
         {/* Shown with every status, so a refused search still says how the query was read. */}
@@ -176,6 +235,13 @@ export default function SemanticSearchPage() {
             constraints={constraints}
             warnings={response?.interpretation.warnings}
             onRemove={removeConstraint}
+          />
+        )}
+
+        {!loading && (
+          <SuggestionChips
+            suggestions={response?.interpretation.suggestions}
+            onAccept={acceptSuggestion}
           />
         )}
 

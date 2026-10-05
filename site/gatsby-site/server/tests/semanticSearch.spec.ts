@@ -1288,4 +1288,426 @@ describe('semanticSearch exclusions', () => {
       expect(resultIds(response)).toEqual([10, 11, 12, 13, 15, 22, 23, 24]);
     });
   });
+
+  describe('inclusions and affected parties', () => {
+    const RESPONSIBLE = ['DEPLOYER', 'DEVELOPER', 'IMPLICATED'];
+
+    const searchFor = (
+      query: string,
+      variables: { limit?: number; filters?: Record<string, unknown> } = {}
+    ) =>
+      makeRequest(url, {
+        query: `
+          query SemanticSearch($query: String!, $limit: Int, $filters: SemanticSearchFilters) {
+            semanticSearch(query: $query, limit: $limit, filters: $filters) {
+              status
+              totalCount
+              results { score incident { incident_id } }
+              interpretation {
+                semanticText
+                constraints {
+                  kind
+                  source
+                  matchedText
+                  roles
+                  incidentCount
+                  entities { entity_id name matchedBy }
+                }
+                warnings { code text }
+                suggestions { kind value label }
+              }
+            }
+          }
+        `,
+        variables: { query, ...variables },
+      });
+
+    const constraintsOf = (response: any) =>
+      interpretationOf(response).constraints.map(({ kind, source, matchedText, roles }: any) => ({
+        kind,
+        source,
+        matchedText,
+        roles,
+      }));
+
+    const suggestionsOf = (response: any) =>
+      interpretationOf(response).suggestions.map(({ value }: any) => value);
+
+    beforeEach(async () => {
+      embedAs([1, 0]);
+
+      await seedCollection({
+        name: 'entities',
+        docs: [
+          { entity_id: 'google', name: 'Google' },
+          { entity_id: 'openai', name: 'OpenAI' },
+          { entity_id: 'university-students', name: 'University students' },
+          { entity_id: 'saferent', name: 'SafeRent' },
+          { entity_id: 'low-income-tenants', name: 'Low-income tenants' },
+          { entity_id: 'economically-vulnerable-people', name: 'Economically vulnerable people' },
+          // Contrived, so that reading "from 2023" as an inclusion would find something.
+          { entity_id: '2023', name: '2023' },
+        ],
+        drop: false,
+      });
+
+      // Scores continue below incident 15: 40 > 41 > 42 > 43 > 44. Newest first: 41, 40, 42, 43, 44.
+      await seedCollection({
+        name: 'incidents',
+        docs: [
+          {
+            ...incident(40, 'Google chatbot misleads university students', {
+              developer: ['google'],
+              harmed: ['university-students'],
+            }),
+            date: '2022-01-01',
+          },
+          {
+            ...incident(41, 'Google proctoring flags students', {
+              deployer: ['google'],
+              harmed: ['students'],
+            }),
+            date: '2023-01-01',
+          },
+          {
+            ...incident(42, 'Essay detector fails students', {
+              developer: ['openai'],
+              harmed: ['students'],
+            }),
+            date: '2021-01-01',
+          },
+          {
+            ...incident(43, 'Screening tool rejects tenants', {
+              deployer: ['saferent'],
+              harmed: ['low-income-tenants'],
+            }),
+            date: '2020-01-01',
+          },
+          {
+            ...incident(44, 'Benefits algorithm cuts payments', {
+              deployer: ['2023'],
+              harmed: ['economically-vulnerable-people'],
+            }),
+            date: '2019-01-01',
+          },
+        ],
+        drop: false,
+      });
+
+      await seedCollection({
+        name: 'incident_embeddings',
+        docs: [
+          vectors(40, [0.75, 0.66]),
+          vectors(41, [0.7, 0.71]),
+          vectors(42, [0.65, 0.76]),
+          vectors(43, [0.6, 0.8]),
+          vectors(44, [0.55, 0.84]),
+        ],
+        drop: false,
+      });
+    });
+
+    it.each(['by', 'from', 'involving', 'involves'])(
+      'keeps only incidents an organisation is responsible for after "%s"',
+      async (word) => {
+        const response = await searchFor(`chatbot failures ${word} google`);
+
+        expect(response.body.errors).toBeUndefined();
+        expect(embedded).toEqual(['chatbot failures']);
+        expect(resultIds(response)).toEqual([40, 41]);
+        expect(interpretationOf(response)).toMatchObject({
+          semanticText: 'chatbot failures',
+          warnings: [],
+          suggestions: [],
+          constraints: [
+            {
+              kind: 'INCLUDE_ENTITY',
+              source: 'QUERY_TEXT',
+              matchedText: 'google',
+              roles: RESPONSIBLE,
+              incidentCount: 2,
+              entities: [{ entity_id: 'google', name: 'Google', matchedBy: 'NAME' }],
+            },
+          ],
+        });
+      }
+    );
+
+    it.each([
+      ['developed by', 'DEVELOPER', [40]],
+      ['made by', 'DEVELOPER', [40]],
+      ['built by', 'DEVELOPER', [40]],
+      ['deployed by', 'DEPLOYER', [41]],
+      ['used by', 'DEPLOYER', [41]],
+      ['operated by', 'DEPLOYER', [41]],
+    ])('restricts an inclusion after "%s" to the %s role', async (phrase, role, ids) => {
+      const response = await searchFor(`chatbots ${phrase} Google`);
+
+      expect(embedded).toEqual(['chatbots']);
+      expect(constraintsOf(response)).toEqual([
+        { kind: 'INCLUDE_ENTITY', source: 'QUERY_TEXT', matchedText: 'Google', roles: [role] },
+      ]);
+      expect(resultIds(response)).toEqual(ids);
+    });
+
+    it.each(['affecting', 'harming', 'targeting', 'against'])(
+      'keeps only incidents a group and groups named after it were harmed in, after "%s"',
+      async (word) => {
+        const response = await searchFor(`incidents ${word} students`);
+
+        expect(embedded).toEqual([]);
+        expect(interpretationOf(response)).toMatchObject({
+          semanticText: '',
+          constraints: [
+            {
+              kind: 'HARMED_PARTY',
+              source: 'QUERY_TEXT',
+              matchedText: 'students',
+              roles: ['HARMED'],
+              incidentCount: 3,
+              // Students deploy a chatbot in incident 15, which is not being harmed.
+              entities: [
+                { entity_id: 'students', name: 'Students', matchedBy: 'NAME' },
+                {
+                  entity_id: 'university-students',
+                  name: 'University students',
+                  matchedBy: 'FAMILY',
+                },
+              ],
+            },
+          ],
+        });
+        expect(resultIds(response)).toEqual([41, 40, 42]);
+      }
+    );
+
+    it('follows links between harmed groups', async () => {
+      await seedCollection({
+        name: 'entity_relationships',
+        docs: [
+          {
+            sub: 'low-income-tenants',
+            obj: 'economically-vulnerable-people',
+            is_symmetric: true,
+            pred: 'related',
+          },
+        ],
+      });
+
+      const response = await searchFor('incidents affecting low-income tenants');
+
+      expect(excludedIds(response)).toEqual([
+        ['low-income-tenants', 'economically-vulnerable-people'],
+      ]);
+      expect(resultIds(response)).toEqual([43, 44]);
+    });
+
+    it('means any of the same kind, all of different kinds, and applies exclusions last', async () => {
+      const either = await searchFor('failures by google and openai');
+      const both = await searchFor('failures by google affecting students');
+      const byRole = await searchFor('failures developed by google, deployed by google');
+      const excluding = await searchFor('failures affecting students excluding openai');
+
+      expect(constraintsOf(either).map(({ matchedText }: any) => matchedText)).toEqual([
+        'google',
+        'openai',
+      ]);
+      expect(resultIds(either)).toEqual([40, 41, 42]);
+      expect(resultIds(both)).toEqual([40, 41]);
+      expect(constraintsOf(byRole).map(({ roles }: any) => roles)).toEqual([
+        ['DEVELOPER'],
+        ['DEPLOYER'],
+      ]);
+      expect(resultIds(byRole)).toEqual([]);
+      expect(resultIds(excluding)).toEqual([40, 41]);
+      expect(embedded).toEqual(['failures', 'failures', 'failures', 'failures']);
+    });
+
+    it('leaves an unknown inclusion in the text exactly as written, without a warning', async () => {
+      const unknown = await searchFor('failures by acme robotics');
+      // Students never develop anything, and the "by" is not read again on its own.
+      const wrongRole = await searchFor('chatbots developed by students');
+      const year = await searchFor('robot failures from 2023');
+
+      for (const response of [unknown, wrongRole, year]) {
+        expect(interpretationOf(response).constraints).toEqual([]);
+        expect(interpretationOf(response).warnings).toEqual([]);
+      }
+
+      // A name left alone after a linking word is not offered as a suggestion either.
+      expect(interpretationOf(wrongRole).suggestions).toEqual([]);
+
+      expect(embedded).toEqual([
+        'failures by acme robotics',
+        'chatbots developed by students',
+        'robot failures from 2023',
+      ]);
+    });
+
+    it('suggests up to three plain mentions of responsible entities, until one is applied', async () => {
+      const query = 'google chatbot misleads students about tesla autopilot and openai';
+
+      const mentioned = await searchFor(query);
+
+      expect(embedded).toEqual([query]);
+      expect(interpretationOf(mentioned).constraints).toEqual([]);
+      expect(interpretationOf(mentioned).suggestions).toEqual([
+        { kind: 'INCLUDE_ENTITY', value: 'google', label: 'Google' },
+        { kind: 'INCLUDE_ENTITY', value: 'students', label: 'Students' },
+        { kind: 'INCLUDE_ENTITY', value: 'tesla-autopilot', label: 'Tesla Autopilot' },
+      ]);
+
+      const accepted = await searchFor(query, { filters: { include: [{ entityId: 'google' }] } });
+
+      expect(embedded).toEqual([query, query]);
+      expect(constraintsOf(accepted)).toEqual([
+        {
+          kind: 'INCLUDE_ENTITY',
+          source: 'EXPLICIT_FILTER',
+          matchedText: 'google',
+          roles: RESPONSIBLE,
+        },
+      ]);
+      expect(suggestionsOf(accepted)).toEqual(['students', 'tesla-autopilot', 'openai']);
+      expect(resultIds(accepted)).toEqual([40, 41]);
+
+      // Tesla drivers are only ever harmed, so only the Tesla in their name is offered.
+      expect(suggestionsOf(await searchFor('crashes hurting tesla drivers'))).toEqual(['tesla']);
+      expect(suggestionsOf(await searchFor('crashes excluding tesla, like tesla'))).toEqual([]);
+    });
+
+    it('reads each inclusion again from its matched text and roles, as the page sends them back', async () => {
+      const typed = await searchFor('chatbot failures developed by google affecting students');
+      const { semanticText, constraints } = interpretationOf(typed);
+
+      expect(resultIds(typed)).toEqual([40]);
+
+      const held = await searchFor(semanticText, {
+        filters: {
+          include: constraints.map(({ matchedText, roles }: any) => ({ name: matchedText, roles })),
+        },
+      });
+
+      expect(embedded).toEqual(['chatbot failures', 'chatbot failures']);
+      expect(interpretationOf(held)).toEqual({
+        ...interpretationOf(typed),
+        constraints: constraints.map((constraint: any) => ({
+          ...constraint,
+          source: 'EXPLICIT_FILTER',
+        })),
+      });
+      expect(resultIds(held)).toEqual([40]);
+    });
+
+    it('takes included ids with roles, and reports ids and names it cannot apply', async () => {
+      const picked = await searchFor('', {
+        filters: {
+          include: [
+            { entityId: 'students', roles: ['HARMED'] },
+            { entityId: 'google' },
+            { entityId: 'google', roles: ['IMPLICATED', 'DEPLOYER', 'DEVELOPER'] },
+          ],
+        },
+      });
+
+      expect(embedded).toEqual([]);
+      expect(constraintsOf(picked)).toEqual([
+        {
+          kind: 'HARMED_PARTY',
+          source: 'EXPLICIT_FILTER',
+          matchedText: 'students',
+          roles: ['HARMED'],
+        },
+        {
+          kind: 'INCLUDE_ENTITY',
+          source: 'EXPLICIT_FILTER',
+          matchedText: 'google',
+          roles: RESPONSIBLE,
+        },
+      ]);
+      expect(resultIds(picked)).toEqual([41, 40]);
+
+      const unknown = await searchFor('crashes', {
+        filters: {
+          include: [
+            { entityId: 'no-such-entity' },
+            { name: 'acme robotics' },
+            { entityId: 'tesla-drivers' },
+            { entityId: 'tesla-drivers', roles: ['HARMED'] },
+          ],
+        },
+      });
+
+      expect(interpretationOf(unknown).warnings).toEqual([
+        { code: 'UNKNOWN_ENTITY', text: 'no-such-entity' },
+        { code: 'UNRECOGNISED_INCLUSION', text: 'acme robotics' },
+        // Tesla drivers are only ever harmed, so nothing is found for them in responsible roles.
+        { code: 'UNKNOWN_ENTITY', text: 'tesla-drivers' },
+      ]);
+      expect(constraintsOf(unknown)).toEqual([
+        {
+          kind: 'HARMED_PARTY',
+          source: 'EXPLICIT_FILTER',
+          matchedText: 'tesla-drivers',
+          roles: ['HARMED'],
+        },
+      ]);
+      expect(resultIds(unknown)).toEqual([13]);
+    });
+
+    it.each([
+      [{ entityId: 'google', name: 'Google' }, 'exactly one of entityId and name'],
+      [{ roles: ['DEVELOPER'] }, 'exactly one of entityId and name'],
+      [{ name: 'students', roles: ['HARMED', 'DEVELOPER'] }, 'HARMED role cannot be combined'],
+    ])('refuses an include filter it cannot read: %j', async (filter, message) => {
+      const response = await searchFor('crashes', { filters: { include: [filter] } });
+
+      expect(response.body.data).toBeNull();
+      expect(response.body.errors).toEqual([
+        expect.objectContaining({
+          message: expect.stringContaining(message),
+          extensions: expect.objectContaining({ code: 'BAD_USER_INPUT' }),
+        }),
+      ]);
+      expect(embedded).toEqual([]);
+    });
+
+    it('counts inclusions towards the limit of 20 entity filters', async () => {
+      const include = Array.from({ length: 11 }, (_, index) => ({ entityId: `entity-${index}` }));
+
+      const refused = await searchFor('crashes', {
+        filters: {
+          excludeNames: Array.from({ length: 10 }, (_, index) => `name-${index}`),
+          include,
+        },
+      });
+
+      expect(refused.body.errors).toEqual([
+        expect.objectContaining({
+          message: 'A search takes at most 20 entity filters, but 21 were given.',
+        }),
+      ]);
+    });
+
+    it('lists every named harmed party as a facet', async () => {
+      const response = await makeRequest(url, {
+        query: `
+          query SemanticSearchFacets {
+            semanticSearchFacets {
+              harmedEntities { entity_id name }
+            }
+          }
+        `,
+      });
+
+      expect(response.body.errors).toBeUndefined();
+      expect(response.body.data.semanticSearchFacets.harmedEntities).toEqual([
+        { entity_id: 'economically-vulnerable-people', name: 'Economically vulnerable people' },
+        { entity_id: 'low-income-tenants', name: 'Low-income tenants' },
+        { entity_id: 'students', name: 'Students' },
+        { entity_id: 'tesla-drivers', name: 'Tesla drivers' },
+        { entity_id: 'university-students', name: 'University students' },
+      ]);
+    });
+  });
 });

@@ -5,13 +5,23 @@
  */
 
 import { MongoClient } from 'mongodb';
-import { EntityRole, RESPONSIBLE_ROLES, ResolvedEntity, toWords, Vocabulary } from './parseQuery';
+import {
+  EntityRole,
+  HARMED_ROLES,
+  RESPONSIBLE_ROLES,
+  ResolvedEntity,
+  toWords,
+  Vocabulary,
+} from './parseQuery';
 
 const ROLE_FIELDS: Record<EntityRole, string> = {
   deployer: 'Alleged deployer of AI system',
   developer: 'Alleged developer of AI system',
   implicated: 'implicated_systems',
+  harmed: 'Alleged harmed or nearly harmed parties',
 };
+
+const ROLES = Object.keys(ROLE_FIELDS) as EntityRole[];
 
 export interface IncidentFacts extends Vocabulary {
   incidentIds: ReadonlySet<number>;
@@ -21,6 +31,8 @@ export interface IncidentFacts extends Vocabulary {
   nameOf: (entityId: string) => string | undefined;
   /** Every named entity that occurs in a responsible role, ordered by name. */
   responsibleEntities: readonly { entityId: string; name: string }[];
+  /** Every named entity that is an alleged harmed or nearly harmed party, ordered by name. */
+  harmedEntities: readonly { entityId: string; name: string }[];
   /** The incident's date as `YYYY-MM-DD`, or an empty string when it has none. */
   dateOf: (incidentId: number) => string;
 }
@@ -64,14 +76,14 @@ export const loadIncidentFacts = async (client: MongoClient): Promise<IncidentFa
   const incidentIds = new Set<number>();
   const dates = new Map<number, string>();
   const incidentsByRole = new Map<EntityRole, Map<string, Set<number>>>(
-    RESPONSIBLE_ROLES.map((role) => [role, new Map()])
+    ROLES.map((role) => [role, new Map()])
   );
 
   for (const incident of incidents) {
     incidentIds.add(incident.incident_id);
     if (typeof incident.date === 'string') dates.set(incident.incident_id, incident.date);
 
-    for (const role of RESPONSIBLE_ROLES) {
+    for (const role of ROLES) {
       const entityIds = incident[ROLE_FIELDS[role]];
 
       if (!Array.isArray(entityIds)) continue;
@@ -103,7 +115,7 @@ export const loadIncidentFacts = async (client: MongoClient): Promise<IncidentFa
     longestNameWords = Math.max(longestNameWords, words.length);
 
     // Only entities that occur somewhere can join a family, so only they are indexed by word.
-    if (occursIn(entityId, RESPONSIBLE_ROLES)) {
+    if (occursIn(entityId, ROLES)) {
       wordsById.set(entityId, words);
       for (const word of new Set(words)) addTo(idsByWord, word, entityId);
     }
@@ -182,9 +194,11 @@ export const loadIncidentFacts = async (client: MongoClient): Promise<IncidentFa
 
   const nameOf = (entityId: string) => names.get(entityId);
 
-  const responsibleEntities = Array.from(wordsById.keys())
-    .map((entityId) => ({ entityId, name: names.get(entityId)! }))
-    .sort((left, right) => left.name.localeCompare(right.name));
+  const entitiesIn = (roles: readonly EntityRole[]) =>
+    Array.from(wordsById.keys())
+      .filter((entityId) => occursIn(entityId, roles))
+      .map((entityId) => ({ entityId, name: names.get(entityId)! }))
+      .sort((left, right) => left.name.localeCompare(right.name));
 
   const dateOf = (incidentId: number) => dates.get(incidentId) ?? '';
 
@@ -195,6 +209,7 @@ export const loadIncidentFacts = async (client: MongoClient): Promise<IncidentFa
     dateOf,
     resolve,
     longestNameWords,
-    responsibleEntities,
+    responsibleEntities: entitiesIn(RESPONSIBLE_ROLES),
+    harmedEntities: entitiesIn(HARMED_ROLES),
   };
 };

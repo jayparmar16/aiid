@@ -21,12 +21,16 @@ import { Context, DBIncident } from '../interfaces';
 import { IncidentFacts, loadIncidentFacts } from '../semanticSearch/incidentFacts';
 import {
   Constraint,
+  EntityRole,
+  HARMED_ROLES,
   InterpretationWarning,
   meaningLeftIn,
   parseQuery,
   readExcludedName,
+  readIncludedName,
   ResolvedEntity,
   RESPONSIBLE_ROLES,
+  Suggestion,
   toWords,
 } from '../semanticSearch/parseQuery';
 import { IncidentType } from '../types/incidents';
@@ -34,6 +38,7 @@ import { IncidentType } from '../types/incidents';
 const EMBEDDING_SCHEMA_VERSION = 2;
 const MAX_QUERY_CHARS = 500;
 const MAX_ENTITY_FILTERS = 20;
+const MAX_SUGGESTIONS = 3;
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
 const MIN_SCORE = 0.15;
@@ -93,6 +98,17 @@ const SemanticSearchEntityType = new GraphQLObjectType({
   },
 });
 
+const SemanticSearchRoleType = new GraphQLEnumType({
+  name: 'SemanticSearchRole',
+  description: 'A role an entity can have in an incident.',
+  values: {
+    DEPLOYER: { value: 'deployer', description: 'Alleged deployer of the AI system.' },
+    DEVELOPER: { value: 'developer', description: 'Alleged developer of the AI system.' },
+    IMPLICATED: { value: 'implicated', description: 'Implicated AI system.' },
+    HARMED: { value: 'harmed', description: 'Alleged harmed or nearly harmed party.' },
+  },
+});
+
 const SemanticSearchConstraintType = new GraphQLObjectType({
   name: 'SemanticSearchConstraint',
   description: 'A rule applied to the results before they are ranked by meaning.',
@@ -105,6 +121,14 @@ const SemanticSearchConstraintType = new GraphQLObjectType({
             EXCLUDE_ENTITY: {
               description:
                 'Removes incidents in which a covered entity is the alleged deployer, developer or implicated system.',
+            },
+            INCLUDE_ENTITY: {
+              description:
+                'Keeps only incidents in which a covered entity has one of the roles: by default the alleged deployer, developer or implicated system.',
+            },
+            HARMED_PARTY: {
+              description:
+                'Keeps only incidents in which a covered entity is an alleged harmed or nearly harmed party.',
             },
           },
         })
@@ -125,6 +149,10 @@ const SemanticSearchConstraintType = new GraphQLObjectType({
       type: GraphQLString,
       description:
         'The words in the query that named what the constraint covers or, for an explicit filter, the name or entity id exactly as given, so a caller can tell which filter it came from.',
+    },
+    roles: {
+      type: new GraphQLList(new GraphQLNonNull(SemanticSearchRoleType)),
+      description: 'The roles in which the covered entities are looked for.',
     },
     entities: {
       type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(SemanticSearchEntityType))),
@@ -148,9 +176,13 @@ const SemanticSearchWarningType = new GraphQLObjectType({
               description:
                 'The words after an exclusion, or a name in the filters, are not a known organisation or system, so nothing was excluded. The words were not searched for either.',
             },
+            UNRECOGNISED_INCLUSION: {
+              description:
+                'A name in the `include` filters is not the whole name of an entity that occurs in its roles, so nothing was filtered on it.',
+            },
             UNKNOWN_ENTITY: {
               description:
-                'An entity id in the filters is unknown, or its entity is never an alleged deployer, developer or implicated system, so that filter was not applied.',
+                'An entity id in the filters is unknown, or neither it nor any entity named after it ever has the roles the filter asks for, so that filter was not applied.',
             },
           },
         })
@@ -159,6 +191,29 @@ const SemanticSearchWarningType = new GraphQLObjectType({
     text: {
       type: new GraphQLNonNull(GraphQLString),
       description: 'The words or entity id concerned, as given.',
+    },
+  },
+});
+
+const SemanticSearchEntityFilterInput = new GraphQLInputObjectType({
+  name: 'SemanticSearchEntityFilter',
+  description:
+    'An entity to keep incidents for, given by exactly one of `entityId` or `name`, with the roles it must have.',
+  fields: {
+    entityId: {
+      type: GraphQLString,
+      description:
+        "Works as if the entity's whole name had been written: it also covers entities named after it and entities editors linked to it.",
+    },
+    name: {
+      type: GraphQLString,
+      description:
+        'A name read exactly as if it had been written after "by", or after "affecting" for the harmed role. It must be one whole entity name. Sending back the matched text and roles of a constraint read from an earlier query applies the same constraint again.',
+    },
+    roles: {
+      type: new GraphQLList(new GraphQLNonNull(SemanticSearchRoleType)),
+      description:
+        'Any of DEPLOYER, DEVELOPER and IMPLICATED, which is the default when left out, or HARMED on its own for an affected party.',
     },
   },
 });
@@ -177,6 +232,37 @@ const SemanticSearchFiltersInput = new GraphQLInputObjectType({
       description:
         'Names to exclude, each read exactly as if it had been written after "excluding", including the first words of a name ("clearview" for "Clearview AI"). The whole text must be one name. Sending back the matched text of a constraint read from an earlier query applies the same constraint again.',
     },
+    include: {
+      type: new GraphQLList(new GraphQLNonNull(SemanticSearchEntityFilterInput)),
+      description:
+        'Entities to keep incidents for. Entries with the same roles mean "any of these", entries with different roles mean "all of these", and exclusions apply afterwards.',
+    },
+  },
+});
+
+const SemanticSearchSuggestionType = new GraphQLObjectType({
+  name: 'SemanticSearchSuggestion',
+  description:
+    'A constraint the query hints at, offered for the user to apply rather than applied.',
+  fields: {
+    kind: {
+      type: new GraphQLNonNull(
+        new GraphQLEnumType({
+          name: 'SemanticSearchSuggestionKind',
+          values: {
+            INCLUDE_ENTITY: {
+              description:
+                'An entity mentioned without a linking word. Applying it means sending its id in `include`.',
+            },
+          },
+        })
+      ),
+    },
+    value: {
+      type: new GraphQLNonNull(GraphQLString),
+      description: 'What to send to apply the suggestion: an entity id for INCLUDE_ENTITY.',
+    },
+    label: { type: new GraphQLNonNull(GraphQLString), description: 'A name to show for it.' },
   },
 });
 
@@ -193,6 +279,10 @@ const SemanticSearchInterpretationType = new GraphQLObjectType({
     },
     warnings: {
       type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(SemanticSearchWarningType))),
+    },
+    suggestions: {
+      type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(SemanticSearchSuggestionType))),
+      description: `At most ${MAX_SUGGESTIONS}, in the order the query mentions them.`,
     },
   },
 });
@@ -231,7 +321,12 @@ const SemanticSearchFacetsType = new GraphQLObjectType({
     responsibleEntities: {
       type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(SemanticSearchFacetEntityType))),
       description:
-        'Every entity that is the alleged deployer, developer or implicated system of an incident, ordered by name. Any of their ids can be passed in `excludeEntities`.',
+        'Every entity that is the alleged deployer, developer or implicated system of an incident, ordered by name. Any of their ids can be passed in `excludeEntities` or `include`.',
+    },
+    harmedEntities: {
+      type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(SemanticSearchFacetEntityType))),
+      description:
+        'Every entity that is an alleged harmed or nearly harmed party in an incident, ordered by name. Any of their ids can be passed in `include` with the HARMED role.',
     },
   },
 });
@@ -546,12 +641,37 @@ const plainInterpretation = (query: string) => ({
   semanticText: query,
   constraints: [],
   warnings: [],
+  suggestions: [],
 });
+
+interface EntityFilter {
+  entityId?: string | null;
+  name?: string | null;
+  roles?: EntityRole[] | null;
+}
 
 interface SemanticSearchFilters {
   excludeEntities?: string[] | null;
   excludeNames?: string[] | null;
+  include?: EntityFilter[] | null;
 }
+
+/** Roles in one fixed order, so the same roles given in any order make the same constraint. */
+const inRoleOrder = (roles: readonly EntityRole[]) =>
+  [...RESPONSIBLE_ROLES, ...HARMED_ROLES].filter((role) => roles.includes(role));
+
+/** Why an inclusion filter can't be read, or undefined when it can. */
+const invalidInclusion = ({ entityId, name, roles }: EntityFilter) => {
+  if (Boolean(entityId) === Boolean(name)) {
+    return 'Each include filter takes exactly one of entityId and name.';
+  }
+
+  if (roles?.includes('harmed') && roles.length > 1) {
+    return 'The HARMED role cannot be combined with other roles in one include filter.';
+  }
+
+  return undefined;
+};
 
 /**
  * Reads each excluded entity id as if the entity's whole name had been typed after "excluding",
@@ -591,6 +711,99 @@ const explicitExclusions = (filters: SemanticSearchFilters, facts: IncidentFacts
 };
 
 /**
+ * Reads each included entity id as if the entity's whole name had been typed after a linking word
+ * with the same roles, and each name as if it had been typed there itself, so an explicit inclusion
+ * covers exactly the entities a typed one would. The HARMED role on its own makes an affected party.
+ */
+const explicitInclusions = (filters: SemanticSearchFilters, facts: IncidentFacts) => {
+  const constraints: Constraint[] = [];
+  const warnings: InterpretationWarning[] = [];
+  const seen = new Set<string>();
+
+  for (const filter of filters.include ?? []) {
+    const roles = inRoleOrder(filter.roles?.length ? filter.roles : RESPONSIBLE_ROLES);
+    const key = JSON.stringify([filter.entityId, filter.name, roles]);
+
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    let entities: ResolvedEntity[];
+
+    if (filter.entityId) {
+      const name = facts.nameOf(filter.entityId);
+
+      entities = name ? facts.resolve(toWords(name), roles) : [];
+      if (entities.length === 0) warnings.push({ code: 'UNKNOWN_ENTITY', text: filter.entityId });
+    } else {
+      entities = readIncludedName(filter.name!, roles, facts);
+      if (entities.length === 0)
+        warnings.push({ code: 'UNRECOGNISED_INCLUSION', text: filter.name! });
+    }
+
+    if (entities.length > 0) {
+      constraints.push({
+        kind: roles.includes('harmed') ? 'HARMED_PARTY' : 'INCLUDE_ENTITY',
+        source: 'EXPLICIT_FILTER',
+        matchedText: filter.entityId || filter.name!,
+        roles,
+        entities,
+      });
+    }
+  }
+
+  return { constraints, warnings };
+};
+
+/**
+ * The group a constraint that keeps incidents belongs to, or undefined for one that removes them.
+ * Constraints in one group mean "any of these" and different groups mean "all of these": inclusions
+ * group by their roles, so "by google and openai" is one group and "by google affecting students"
+ * is two.
+ */
+const requirementGroup = (constraint: Constraint): string | undefined => {
+  switch (constraint.kind) {
+    case 'INCLUDE_ENTITY':
+      return `include:${[...constraint.roles].sort().join(',')}`;
+    case 'HARMED_PARTY':
+      return 'harmed';
+    default:
+      return undefined;
+  }
+};
+
+/**
+ * The incidents left by constraints that each come with the incidents they apply to: those in every
+ * group of requirements, minus those any exclusion applies to.
+ */
+const allowedBy = (
+  applied: { constraint: Constraint; incidents: ReadonlySet<number> }[],
+  incidentIds: ReadonlySet<number>
+) => {
+  const required = new Map<string, Set<number>>();
+  const excluded = new Set<number>();
+
+  for (const { constraint, incidents } of applied) {
+    const group = requirementGroup(constraint);
+    let into = excluded;
+
+    if (group !== undefined) {
+      into = required.get(group) ?? new Set<number>();
+      required.set(group, into);
+    }
+
+    for (const incidentId of incidents) into.add(incidentId);
+  }
+
+  const groups = Array.from(required.values());
+
+  return new Set(
+    Array.from(incidentIds).filter(
+      (incidentId) => !excluded.has(incidentId) && groups.every((group) => group.has(incidentId))
+    )
+  );
+};
+
+/**
  * Keeps the first of any constraints that cover the same entities in the same way, so a page that
  * sends back the constraints it holds never gets one twice when the user types it again.
  */
@@ -614,12 +827,15 @@ const withoutRepeats = (constraints: Constraint[]) => {
  */
 const interpret = (query: string, facts: IncidentFacts, filters: SemanticSearchFilters) => {
   const parsed = parseQuery(query, facts);
-  const explicit = explicitExclusions(filters, facts);
+  const explicit = [explicitExclusions(filters, facts), explicitInclusions(filters, facts)];
 
   // Explicit filters come first, so the constraints a page sends back keep their order and newly
   // typed ones follow them.
-  const constraints = withoutRepeats([...explicit.constraints, ...parsed.constraints]);
-  const warnings = [...explicit.warnings, ...parsed.warnings];
+  const constraints = withoutRepeats([
+    ...explicit.flatMap((read) => read.constraints),
+    ...parsed.constraints,
+  ]);
+  const warnings = [...explicit.flatMap((read) => read.warnings), ...parsed.warnings];
 
   const applied = constraints.map((constraint) => ({
     constraint,
@@ -629,25 +845,30 @@ const interpret = (query: string, facts: IncidentFacts, filters: SemanticSearchF
     ),
   }));
 
-  const excluded = new Set(applied.flatMap(({ incidents }) => Array.from(incidents)));
-
   // Explicit filters are constraints taken out of the query too, so a query of filler words sent
   // with them leaves nothing to rank by meaning. Without constraints it is ranked as written.
   const semanticText =
     applied.length > 0 ? meaningLeftIn(parsed.semanticText) : parsed.semanticText;
 
-  const allowedIncidentIds =
-    applied.length > 0
-      ? new Set(Array.from(facts.incidentIds).filter((incidentId) => !excluded.has(incidentId)))
-      : undefined;
+  const allowedIncidentIds = applied.length > 0 ? allowedBy(applied, facts.incidentIds) : undefined;
+
+  // A mention is offered only while no constraint covers it already, as after it was accepted.
+  const covered = new Set(
+    constraints.flatMap((constraint) => constraint.entities.map((entity) => entity.entityId))
+  );
+  const suggestions = parsed.suggestions
+    .filter((suggestion: Suggestion) => !covered.has(suggestion.value))
+    .slice(0, MAX_SUGGESTIONS);
 
   const interpretation = {
     semanticText,
     warnings,
+    suggestions,
     constraints: applied.map(({ constraint, incidents }) => ({
       kind: constraint.kind,
       source: constraint.source,
       matchedText: constraint.matchedText,
+      roles: constraint.roles,
       entities: constraint.entities.map(({ entityId, name, matchedBy }) => ({
         entity_id: entityId,
         name,
@@ -659,6 +880,11 @@ const interpret = (query: string, facts: IncidentFacts, filters: SemanticSearchF
 
   return { interpretation, allowedIncidentIds };
 };
+
+const asFacetEntity = ({ entityId, name }: { entityId: string; name: string }) => ({
+  entity_id: entityId,
+  name,
+});
 
 export const queryFields: GraphQLFieldConfigMap<any, Context> = {
   semanticSearch: {
@@ -680,7 +906,9 @@ export const queryFields: GraphQLFieldConfigMap<any, Context> = {
       );
       const filters: SemanticSearchFilters = args.filters ?? {};
       const entityFilterCount =
-        (filters.excludeEntities?.length ?? 0) + (filters.excludeNames?.length ?? 0);
+        (filters.excludeEntities?.length ?? 0) +
+        (filters.excludeNames?.length ?? 0) +
+        (filters.include?.length ?? 0);
 
       // Each entity filter costs a name expansion and an incident lookup, so their number is capped.
       // The error is returned, not thrown: in production the permissions layer replaces thrown
@@ -691,6 +919,10 @@ export const queryFields: GraphQLFieldConfigMap<any, Context> = {
           { extensions: { code: 'BAD_USER_INPUT' } }
         );
       }
+
+      const invalid = (filters.include ?? []).map(invalidInclusion).find(Boolean);
+
+      if (invalid) return new GraphQLError(invalid, { extensions: { code: 'BAD_USER_INPUT' } });
 
       if (!query && entityFilterCount === 0) {
         return { ...noResults('OK'), interpretation: plainInterpretation(query) };
@@ -731,10 +963,8 @@ export const queryFields: GraphQLFieldConfigMap<any, Context> = {
         const facts = await cachedFacts(FACTS_CACHE_KEY, () => loadIncidentFacts(context.client));
 
         return {
-          responsibleEntities: facts.responsibleEntities.map(({ entityId, name }) => ({
-            entity_id: entityId,
-            name,
-          })),
+          responsibleEntities: facts.responsibleEntities.map(asFacetEntity),
+          harmedEntities: facts.harmedEntities.map(asFacetEntity),
         };
       } catch (error) {
         Sentry.captureException(error);

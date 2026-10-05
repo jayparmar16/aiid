@@ -6,10 +6,13 @@
  * folding) lives here and nowhere else.
  */
 
-export type EntityRole = 'deployer' | 'developer' | 'implicated';
+export type EntityRole = 'deployer' | 'developer' | 'implicated' | 'harmed';
 
 /** The roles in which an organisation or system is responsible for an incident. */
 export const RESPONSIBLE_ROLES: readonly EntityRole[] = ['deployer', 'developer', 'implicated'];
+
+/** The role of the parties an incident harmed or nearly harmed. */
+export const HARMED_ROLES: readonly EntityRole[] = ['harmed'];
 
 export interface ResolvedEntity {
   entityId: string;
@@ -38,8 +41,12 @@ export interface Vocabulary {
   longestNameWords: number;
 }
 
-export interface ExcludeEntityConstraint {
-  kind: 'EXCLUDE_ENTITY';
+/**
+ * EXCLUDE_ENTITY removes the incidents its entities occur in. INCLUDE_ENTITY and HARMED_PARTY keep
+ * only those incidents, the first through responsible roles and the second through the harmed role.
+ */
+export interface EntityConstraint {
+  kind: 'EXCLUDE_ENTITY' | 'INCLUDE_ENTITY' | 'HARMED_PARTY';
   source: 'QUERY_TEXT' | 'EXPLICIT_FILTER';
   /** The words written in the query or, for an explicit filter, the name or entity id as given. */
   matchedText: string;
@@ -47,11 +54,19 @@ export interface ExcludeEntityConstraint {
   entities: ResolvedEntity[];
 }
 
-export type Constraint = ExcludeEntityConstraint;
+export type Constraint = EntityConstraint;
 
 export interface InterpretationWarning {
-  code: 'UNRECOGNISED_EXCLUSION' | 'UNKNOWN_ENTITY';
+  code: 'UNRECOGNISED_EXCLUSION' | 'UNRECOGNISED_INCLUSION' | 'UNKNOWN_ENTITY';
   text: string;
+}
+
+/** A constraint offered for the user to accept, rather than applied. */
+export interface Suggestion {
+  /** INCLUDE_ENTITY offers to keep only the incidents the entity with id `value` is responsible for. */
+  kind: 'INCLUDE_ENTITY';
+  value: string;
+  label: string;
 }
 
 export interface Interpretation {
@@ -62,6 +77,8 @@ export interface Interpretation {
   semanticText: string;
   constraints: Constraint[];
   warnings: InterpretationWarning[];
+  /** Plain mentions of responsible entities, in the order written, each offered as an inclusion. */
+  suggestions: Suggestion[];
 }
 
 interface Token {
@@ -120,6 +137,32 @@ const EXCLUSION_PHRASES = [
   ...WEAK_EXCLUSIONS.map((phrase) => ({ words: phrase.split(' '), strong: false })),
 ];
 
+interface InclusionPhrase {
+  words: string[];
+  kind: 'INCLUDE_ENTITY' | 'HARMED_PARTY';
+  roles: readonly EntityRole[];
+}
+
+const inclusions = (
+  phrases: string[],
+  kind: InclusionPhrase['kind'],
+  roles: readonly EntityRole[]
+): InclusionPhrase[] => phrases.map((phrase) => ({ words: phrase.split(' '), kind, roles }));
+
+/**
+ * Linking words that keep only the incidents involving what follows them. The role-specific
+ * phrases come before the bare "by" they end with, so "developed by" restricts the match to
+ * developers.
+ */
+const INCLUSION_PHRASES = [
+  ...inclusions(['developed by', 'made by', 'built by'], 'INCLUDE_ENTITY', ['developer']),
+  ...inclusions(['deployed by', 'used by', 'operated by'], 'INCLUDE_ENTITY', ['deployer']),
+  ...inclusions(['by', 'from', 'involving', 'involves'], 'INCLUDE_ENTITY', RESPONSIBLE_ROLES),
+  ...inclusions(['affecting', 'harming', 'targeting', 'against'], 'HARMED_PARTY', HARMED_ROLES),
+];
+
+const YEAR = /^\d{4}$/;
+
 const ARTICLES = new Set(['the', 'a', 'an', 'any', 'all']);
 const LIST_JOINERS = new Set(['and', 'or']);
 const BREAK = /[,.;:!?()[\]{}"“”]/;
@@ -134,11 +177,14 @@ const withSingulars = (word: string): string[] => {
 };
 
 /** The entities the words name, trying singular forms of the last word after the word as written. */
-const readName = (words: string[], vocabulary: Vocabulary, allowNameStart: boolean) => {
+const readName = (
+  words: string[],
+  vocabulary: Vocabulary,
+  allowNameStart: boolean,
+  roles: readonly EntityRole[] = RESPONSIBLE_ROLES
+) => {
   for (const last of withSingulars(words[words.length - 1])) {
-    const entities = vocabulary.resolve([...words.slice(0, -1), last], RESPONSIBLE_ROLES, {
-      allowNameStart,
-    });
+    const entities = vocabulary.resolve([...words.slice(0, -1), last], roles, { allowNameStart });
     if (entities.length > 0) return entities;
   }
 
@@ -155,6 +201,22 @@ export const readExcludedName = (name: string, vocabulary: Vocabulary): Resolved
   const words = toWords(name);
 
   return words.length > 0 ? readName(words, vocabulary, true) : [];
+};
+
+/**
+ * The entities occurring in `roles` that a name covers when it is written after a linking word such
+ * as "by" or "affecting", or an empty list when the whole text is not one known name. Unlike after
+ * "excluding", the first words of a name are not enough: a linking word is everyday English, and
+ * "affecting black" would otherwise keep every incident affecting Black students, drivers and so on.
+ */
+export const readIncludedName = (
+  name: string,
+  roles: readonly EntityRole[],
+  vocabulary: Vocabulary
+): ResolvedEntity[] => {
+  const words = toWords(name);
+
+  return words.length > 0 ? readName(words, vocabulary, false, roles) : [];
 };
 
 /**
@@ -204,6 +266,10 @@ export const parseQuery = (query: string, vocabulary: Vocabulary): Interpretatio
   const warnings: InterpretationWarning[] = [];
   const removed: [number, number][] = [];
 
+  // Where a name after a linking word starts. A name there was either read as a constraint or
+  // deliberately left alone, so it is never offered as a suggestion either.
+  const afterLinkingWord = new Set<number>();
+
   const gapBefore = (index: number) =>
     index > 0 && index < tokens.length
       ? query.slice(tokens[index - 1].end, tokens[index].start)
@@ -218,6 +284,22 @@ export const parseQuery = (query: string, vocabulary: Vocabulary): Interpretatio
       )
     );
 
+  /** The inclusion phrase starting at `index`, except "from" before a year, which is a date. */
+  const inclusionAt = (index: number) => {
+    const inclusion = INCLUSION_PHRASES.find(({ words }) =>
+      words.every(
+        (word, offset) =>
+          tokens[index + offset]?.word === word &&
+          (offset === 0 || !BREAK.test(gapBefore(index + offset)))
+      )
+    );
+
+    if (inclusion?.words[0] === 'from' && YEAR.test(tokens[index + 1]?.word ?? ''))
+      return undefined;
+
+    return inclusion;
+  };
+
   const skipArticles = (index: number) => {
     while (index < tokens.length && ARTICLES.has(tokens[index].word)) index++;
     return index;
@@ -228,7 +310,11 @@ export const parseQuery = (query: string, vocabulary: Vocabulary): Interpretatio
    * strong phrase accepts the start of a name, because the everyday words that weak phrases and
    * prefixes catch ("not work", "non-consensual") often begin some entity's name.
    */
-  const nameAt = (start: number, allowNameStart = false): NameMatch | null => {
+  const nameAt = (
+    start: number,
+    allowNameStart = false,
+    roles: readonly EntityRole[] = RESPONSIBLE_ROLES
+  ): NameMatch | null => {
     const longest = Math.min(vocabulary.longestNameWords, tokens.length - start);
 
     for (let count = longest; count > 0; count--) {
@@ -239,7 +325,7 @@ export const parseQuery = (query: string, vocabulary: Vocabulary): Interpretatio
       if (crossesBreak) continue;
 
       const words = tokens.slice(start, end).map((token) => token.word);
-      const entities = readName(words, vocabulary, allowNameStart);
+      const entities = readName(words, vocabulary, allowNameStart, roles);
 
       if (entities.length > 0) return { start, end, entities };
     }
@@ -248,12 +334,16 @@ export const parseQuery = (query: string, vocabulary: Vocabulary): Interpretatio
   };
 
   /** Reads "tesla", "tesla and uber" or "tesla, waymo, or uber", stopping at an unknown name. */
-  const namesAt = (start: number, allowNameStart: boolean): NameMatch[] => {
+  const namesAt = (
+    start: number,
+    allowNameStart: boolean,
+    roles: readonly EntityRole[] = RESPONSIBLE_ROLES
+  ): NameMatch[] => {
     const names: NameMatch[] = [];
     let at = skipArticles(start);
 
     while (at < tokens.length) {
-      const name = nameAt(at, allowNameStart);
+      const name = nameAt(at, allowNameStart, roles);
       if (!name) break;
       names.push(name);
 
@@ -272,7 +362,10 @@ export const parseQuery = (query: string, vocabulary: Vocabulary): Interpretatio
 
   /** Whether a token range ending at `end` is followed by the end, punctuation or a linking word. */
   const endsAtBreak = (end: number) =>
-    end >= tokens.length || BREAK.test(gapBefore(end)) || Boolean(phraseAt(end));
+    end >= tokens.length ||
+    BREAK.test(gapBefore(end)) ||
+    Boolean(phraseAt(end)) ||
+    Boolean(inclusionAt(end));
 
   /** The first token after `start` that begins a new clause, or the end of the query. */
   const clauseEnd = (start: number) => {
@@ -289,6 +382,67 @@ export const parseQuery = (query: string, vocabulary: Vocabulary): Interpretatio
       roles: RESPONSIBLE_ROLES,
       entities: name.entities,
     });
+
+  /**
+   * Reads the names after an inclusion phrase as constraints and returns where reading continues.
+   * Each name must be an entity's whole name and occur in the phrase's roles. Anything else is left
+   * in the text exactly as written, linking word included, so nothing typed is lost.
+   */
+  const include = (index: number, inclusion: InclusionPhrase) => {
+    const afterPhrase = index + inclusion.words.length;
+    const names = namesAt(afterPhrase, false, inclusion.roles);
+
+    afterLinkingWord.add(skipArticles(afterPhrase));
+
+    if (names.length === 0) return afterPhrase;
+
+    for (const name of names) {
+      constraints.push({
+        kind: inclusion.kind,
+        source: 'QUERY_TEXT',
+        matchedText: query.slice(tokens[name.start].start, tokens[name.end - 1].end),
+        roles: inclusion.roles,
+        entities: name.entities,
+      });
+    }
+
+    const end = names[names.length - 1].end;
+
+    removed.push([tokens[index].start, tokens[end - 1].end]);
+
+    return end;
+  };
+
+  /**
+   * Offers each plain mention of an entity that is responsible for some incident as an inclusion,
+   * since it stays part of the meaning unless the user chooses to filter by it. The entity whose
+   * whole name was written is offered, not its family.
+   */
+  const suggestionsFor = () => {
+    const suggestions: Suggestion[] = [];
+    const isRemoved = (token: Token) =>
+      removed.some(([start, end]) => token.start >= start && token.end <= end);
+
+    let at = 0;
+
+    while (at < tokens.length) {
+      const name = isRemoved(tokens[at]) || afterLinkingWord.has(at) ? null : nameAt(at);
+      const named = name?.entities.find((entity) => entity.matchedBy === 'NAME');
+
+      if (!name || tokens.slice(at, name.end).some(isRemoved)) {
+        at++;
+        continue;
+      }
+
+      if (named && !suggestions.some((suggestion) => suggestion.value === named.entityId)) {
+        suggestions.push({ kind: 'INCLUDE_ENTITY', value: named.entityId, label: named.name });
+      }
+
+      at = name.end;
+    }
+
+    return suggestions;
+  };
 
   let index = 0;
 
@@ -325,7 +479,9 @@ export const parseQuery = (query: string, vocabulary: Vocabulary): Interpretatio
     const phrase = phraseAt(index);
 
     if (!phrase) {
-      index++;
+      const inclusion = inclusionAt(index);
+
+      index = inclusion ? include(index, inclusion) : index + 1;
       continue;
     }
 
@@ -360,7 +516,9 @@ export const parseQuery = (query: string, vocabulary: Vocabulary): Interpretatio
     index = stop;
   }
 
-  if (removed.length === 0) return { semanticText: query, constraints, warnings };
+  const suggestions = suggestionsFor();
+
+  if (removed.length === 0) return { semanticText: query, constraints, warnings, suggestions };
 
   let semanticText = '';
   let cursor = 0;
@@ -374,5 +532,6 @@ export const parseQuery = (query: string, vocabulary: Vocabulary): Interpretatio
     semanticText: meaningLeftIn(tidy(semanticText + query.slice(cursor))),
     constraints,
     warnings,
+    suggestions,
   };
 };
