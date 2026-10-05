@@ -74,7 +74,6 @@ const kindLabels = {
   INCLUDE_ENTITY: 'Involving',
   HARMED_PARTY: 'Affecting',
   DATE_RANGE: 'Date range',
-  MIT_RISK_DOMAIN: 'MIT risk domain',
 };
 
 const sourceLabels = { QUERY_TEXT: 'Query text' };

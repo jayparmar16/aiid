@@ -21,7 +21,6 @@ export const SEMANTIC_SEARCH = gql(`
           source
           matchedText
           roles
-          mitRiskDomain
           incidentCount
           dateFrom
           dateTo
@@ -58,7 +57,6 @@ export const SEMANTIC_SEARCH_FACETS = gql(`
       }
       earliestDate
       latestDate
-      mitRiskDomains
     }
   }
 `);

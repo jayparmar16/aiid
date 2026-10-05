@@ -42,8 +42,6 @@ export interface Vocabulary {
   incidentCount: (entityIds: readonly string[], roles: readonly EntityRole[]) => number;
   /** The most words in any entity name, which bounds the longest-match search. */
   longestNameWords: number;
-  /** The MIT risk domains, exactly as stored ("3. Misinformation"). */
-  mitRiskDomains: readonly string[];
 }
 
 /**
@@ -69,24 +67,10 @@ export interface DateRangeConstraint {
   dateTo: string | null;
 }
 
-/** Never read from the query text: words only ever suggest a domain. */
-export interface MitRiskDomainConstraint {
-  kind: 'MIT_RISK_DOMAIN';
-  source: 'EXPLICIT_FILTER';
-  /** The domain exactly as given. */
-  matchedText: string;
-  mitRiskDomain: string;
-}
-
-export type Constraint = EntityConstraint | DateRangeConstraint | MitRiskDomainConstraint;
+export type Constraint = EntityConstraint | DateRangeConstraint;
 
 export interface InterpretationWarning {
-  code:
-    | 'UNRECOGNISED_EXCLUSION'
-    | 'UNRECOGNISED_INCLUSION'
-    | 'UNKNOWN_ENTITY'
-    | 'INVALID_DATE'
-    | 'UNKNOWN_MIT_DOMAIN';
+  code: 'UNRECOGNISED_EXCLUSION' | 'UNRECOGNISED_INCLUSION' | 'UNKNOWN_ENTITY' | 'INVALID_DATE';
   text: string;
 }
 
@@ -94,9 +78,8 @@ export interface InterpretationWarning {
 export interface Suggestion {
   /**
    * INCLUDE_ENTITY offers to keep only the incidents the entity with id `value` is responsible for.
-   * MIT_RISK_DOMAIN offers the domain exactly as stored.
    */
-  kind: 'INCLUDE_ENTITY' | 'MIT_RISK_DOMAIN';
+  kind: 'INCLUDE_ENTITY';
   /** The value to send back as an explicit filter. */
   value: string;
   label: string;
@@ -110,7 +93,7 @@ export interface Interpretation {
   semanticText: string;
   constraints: Constraint[];
   warnings: InterpretationWarning[];
-  /** Entities and MIT domains the query mentions without asking for them, in the order written. */
+  /** Entities the query mentions without asking for them, in the order written. */
   suggestions: Suggestion[];
 }
 
@@ -424,60 +407,6 @@ const tidy = (text: string) =>
     .replace(/\s+([,.;:!?])/g, '$1')
     .replace(/([,;:])\s*(?=[,.;:!?])/g, '')
     .replace(/^[\s,;:.-]+|[\s,;:-]+$/g, '');
-
-/** The domain's name without its number: "Misinformation" for "3. Misinformation". */
-export const mitDomainLabel = (domain: string) => domain.replace(/^\s*\d+\.\s*/, '');
-
-const MIT_STOPWORDS = new Set(['and', 'or', 'of', 'the']);
-
-/**
- * The word sequences that suggest each MIT risk domain, taken from its name. A name lists several
- * ideas joined by "&", "and" or commas ("Malicious Actors & Misuse"), and each idea has to be
- * written in full: on their own, words such as "AI", "system", "actors" and "harms" turn up in
- * all kinds of queries, while "malicious actors" or "misuse" point at the domain.
- */
-const mitDomainPhrases = (domain: string) =>
-  mitDomainLabel(domain)
-    .split(/&|,|\band\b/i)
-    .map((idea) => toWords(idea).filter((word) => !MIT_STOPWORDS.has(word)))
-    .filter((words) => words.length > 0);
-
-/**
- * The MIT risk domains the words name an idea of, in the order they are first named. They are
- * only ever suggested, since a hard filter would hide every incident without an MIT
- * classification.
- */
-const suggestMitDomains = (tokens: Token[], vocabulary: Vocabulary): Suggestion[] => {
-  const forms = tokens.map((token) => withSingulars(token.word));
-  const found: { at: number; domain: string }[] = [];
-
-  for (const domain of vocabulary.mitRiskDomains) {
-    const singularPhrases = mitDomainPhrases(domain).map((words) =>
-      words.map((word) => withSingulars(word))
-    );
-    let first = Infinity;
-
-    for (const phrase of singularPhrases) {
-      for (let start = 0; start + phrase.length <= tokens.length; start++) {
-        const matches = phrase.every((wordForms, offset) =>
-          forms[start + offset].some((form) => wordForms.includes(form))
-        );
-
-        if (matches) first = Math.min(first, start);
-      }
-    }
-
-    if (first < Infinity) found.push({ at: first, domain });
-  }
-
-  return found
-    .sort((left, right) => left.at - right.at)
-    .map(({ domain }) => ({
-      kind: 'MIT_RISK_DOMAIN',
-      value: domain,
-      label: mitDomainLabel(domain),
-    }));
-};
 
 /**
  * `now` anchors "this year", "last year" and "past N years", which are counted in UTC. Several date
@@ -810,16 +739,7 @@ export const parseQuery = (query: string, vocabulary: Vocabulary, now: Date): In
     });
   }
 
-  // Words taken out as constraints, such as "excluding misinformation", suggest nothing.
-  const suggestions = [
-    ...suggestionsFor(),
-    ...suggestMitDomains(
-      tokens.filter(
-        (token) => !removed.some(([start, end]) => token.start >= start && token.end <= end)
-      ),
-      vocabulary
-    ),
-  ];
+  const suggestions = suggestionsFor();
 
   if (removed.length === 0) return { semanticText: query, constraints, warnings, suggestions };
 

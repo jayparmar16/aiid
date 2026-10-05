@@ -10,7 +10,6 @@ import SearchInterpretation from '../../components/semanticSearch/SearchInterpre
 import OrganisationFilter from '../../components/semanticSearch/OrganisationFilter';
 import AffectedPartyFilter from '../../components/semanticSearch/AffectedPartyFilter';
 import DateRangeFilter from '../../components/semanticSearch/DateRangeFilter';
-import MitRiskDomainFilter from '../../components/semanticSearch/MitRiskDomainFilter';
 import { kindOf } from '../../components/semanticSearch/EntityFilter';
 import { SEMANTIC_SEARCH } from '../../graphql/semanticSearch';
 
@@ -30,10 +29,8 @@ const sameRoles = (left, right) =>
 // A date range chip is held by its bounds, either of which may be null.
 const isDateChip = ({ filter }) => 'dateFrom' in filter;
 
-const isMitChip = ({ filter }) => Boolean(filter.mitRiskDomain);
-
 // The chips the organisation and affected party controls edit, which name entities.
-const isEntityChip = (chip) => !isDateChip(chip) && !isMitChip(chip);
+const isEntityChip = (chip) => !isDateChip(chip);
 
 /** An inclusion or affected party as the search takes it: by id or by name, with its roles. */
 const includeFilter = ({ filter, constraint }) => {
@@ -48,13 +45,11 @@ const includeFilter = ({ filter, constraint }) => {
 /**
  * Sends each chip's filter back with the next search. A typed constraint is held by the words that
  * named it, which the search reads again exactly as typed, so it keeps every entity it covered.
- * Inclusions, MIT risk domains and a date range are sent only when held, so other searches ask
+ * Inclusions and a date range are sent only when held, so other searches ask
  * exactly what they did.
  */
 const filtersFor = (chips) => {
   const dateChip = chips.find(isDateChip);
-
-  const mitRiskDomains = chips.filter(isMitChip).map(({ filter }) => filter.mitRiskDomain);
 
   const entityChips = chips.filter(isEntityChip);
 
@@ -68,20 +63,13 @@ const filtersFor = (chips) => {
     excludeEntities: exclusions.flatMap((filter) => (filter.id ? [filter.id] : [])),
     excludeNames: exclusions.flatMap((filter) => (filter.name ? [filter.name] : [])),
     ...(include.length > 0 && { include }),
-    ...(mitRiskDomains.length > 0 && { mitRiskDomains }),
     ...(dateChip && { dateFrom: dateChip.filter.dateFrom, dateTo: dateChip.filter.dateTo }),
   };
 };
 
 // Whether a constraint is the one a held chip's filter asked for. An explicit constraint echoes the
-// name, id or MIT domain it was sent as its matched text.
+// name or id it was sent as its matched text.
 const isHeldBy = (chip, constraint) => {
-  if (isMitChip(chip)) {
-    return (
-      constraint.kind === 'MIT_RISK_DOMAIN' && constraint.matchedText === chip.filter.mitRiskDomain
-    );
-  }
-
   return (
     kindOf({ filter: chip.filter }) === constraint.kind &&
     constraint.matchedText === (chip.filter.name ?? chip.filter.id) &&
@@ -92,7 +80,7 @@ const isHeldBy = (chip, constraint) => {
 
 /**
  * Pairs each constraint a search applied with the filter that brings it back. An explicit one
- * echoes the name, id or MIT domain it was sent as its matched text, so held chips keep their filter
+ * echoes the name or id it was sent as its matched text, so held chips keep their filter
  * and their place, and a held filter that matches nothing any more is dropped. Newly typed ones
  * follow, held by their matched text.
  */
@@ -204,10 +192,6 @@ export default function SemanticSearchPage() {
         { filter: { kind: 'INCLUDE_ENTITY', id: suggestion.value }, label: suggestion.label },
       ]);
     }
-
-    if (suggestion.kind === 'MIT_RISK_DOMAIN') {
-      runSearch(input, [...chips, { filter: { mitRiskDomain: suggestion.value } }]);
-    }
   };
 
   // A chip picked from a control has no constraint until its search returns.
@@ -268,12 +252,6 @@ export default function SemanticSearchPage() {
         </form>
 
         <OrganisationFilter chips={entityChips} disabled={loading} onChange={changeEntities} />
-
-        <MitRiskDomainFilter
-          chips={chips}
-          disabled={loading}
-          onChange={(next) => runSearch(input, next)}
-        />
 
         <AffectedPartyFilter chips={entityChips} disabled={loading} onChange={changeEntities} />
 

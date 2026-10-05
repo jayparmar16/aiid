@@ -1,8 +1,8 @@
 /**
  * The facts semantic search filters on, loaded from MongoDB in one pass and held in memory: entity
  * names, the links editors made between entities, which incidents each entity occurs in, by role,
- * and each incident's MIT risk domain. It is the parser's vocabulary and the source of every
- * constraint's incident set.
+ * and each incident's date. It is the parser's vocabulary and the source of every constraint's
+ * incident set.
  */
 
 import { MongoClient } from 'mongodb';
@@ -43,25 +43,9 @@ export interface IncidentFacts extends Vocabulary {
   incidentsDated: (dateFrom: string | null, dateTo: string | null) => Set<number>;
   /** The earliest and latest incident dates, or null when no incident has a usable date. */
   dateSpan: { earliest: string; latest: string } | null;
-  /** Incidents whose published MIT classification has any of the risk domains. */
-  incidentsInMitDomains: (domains: readonly string[]) => Set<number>;
 }
 
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
-
-const MIT_NAMESPACE = 'MIT';
-const MIT_RISK_DOMAIN = 'Risk Domain';
-
-/** The attribute's value, which classifications store as a JSON-encoded string. */
-const parseValue = (valueJson: unknown): unknown => {
-  if (typeof valueJson !== 'string') return undefined;
-
-  try {
-    return JSON.parse(valueJson);
-  } catch {
-    return undefined;
-  }
-};
 
 const containsSequence = (words: readonly string[], sequence: readonly string[]) => {
   for (let start = 0; start + sequence.length <= words.length; start++) {
@@ -84,7 +68,7 @@ export const loadIncidentFacts = async (client: MongoClient): Promise<IncidentFa
   const db = client.db('aiidprod');
   const roleProjection = Object.fromEntries(Object.values(ROLE_FIELDS).map((field) => [field, 1]));
 
-  const [entities, incidents, links, mitTaxa, mitClassifications] = await Promise.all([
+  const [entities, incidents, links] = await Promise.all([
     db
       .collection('entities')
       .find({}, { projection: { _id: 0, entity_id: 1, name: 1 } })
@@ -96,24 +80,6 @@ export const loadIncidentFacts = async (client: MongoClient): Promise<IncidentFa
     db
       .collection('entity_relationships')
       .find({}, { projection: { _id: 0, sub: 1, obj: 1, is_symmetric: 1 } })
-      .toArray(),
-    db
-      .collection('taxa')
-      .find({ namespace: MIT_NAMESPACE }, { projection: { _id: 0, field_list: 1 } })
-      .toArray(),
-    // Only published classifications count, as everywhere else on the site.
-    db
-      .collection('classifications')
-      .find(
-        { namespace: MIT_NAMESPACE, publish: true },
-        {
-          projection: {
-            _id: 0,
-            incidents: 1,
-            attributes: { $elemMatch: { short_name: MIT_RISK_DOMAIN } },
-          },
-        }
-      )
       .toArray(),
   ]);
 
@@ -277,31 +243,6 @@ export const loadIncidentFacts = async (client: MongoClient): Promise<IncidentFa
       ? { earliest: sortedDates[0], latest: sortedDates[sortedDates.length - 1] }
       : null;
 
-  const incidentsByMitDomain = new Map<string, Set<number>>();
-
-  for (const classification of mitClassifications) {
-    const domain = parseValue(classification.attributes?.[0]?.value_json);
-
-    if (typeof domain !== 'string' || !Array.isArray(classification.incidents)) continue;
-
-    for (const incidentId of classification.incidents) {
-      addTo(incidentsByMitDomain, domain, incidentId);
-    }
-  }
-
-  // The taxonomy lists the domains in their numbered order. Should it be missing, the domains that
-  // classifications use are still offered.
-  const permittedDomains = mitTaxa
-    .flatMap((taxa) => (Array.isArray(taxa.field_list) ? taxa.field_list : []))
-    .find((field) => field?.short_name === MIT_RISK_DOMAIN)?.permitted_values;
-
-  const mitRiskDomains: string[] = Array.isArray(permittedDomains)
-    ? permittedDomains.filter((domain): domain is string => typeof domain === 'string')
-    : Array.from(incidentsByMitDomain.keys()).sort();
-
-  const incidentsInMitDomains = (domains: readonly string[]) =>
-    new Set(domains.flatMap((domain) => Array.from(incidentsByMitDomain.get(domain) ?? [])));
-
   return {
     incidentsDated,
     dateSpan,
@@ -315,7 +256,5 @@ export const loadIncidentFacts = async (client: MongoClient): Promise<IncidentFa
     longestNameWords,
     responsibleEntities: entitiesIn(RESPONSIBLE_ROLES),
     harmedEntities: entitiesIn(HARMED_ROLES),
-    mitRiskDomains,
-    incidentsInMitDomains,
   };
 };

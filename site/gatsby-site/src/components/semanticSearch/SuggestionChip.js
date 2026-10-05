@@ -5,10 +5,7 @@ import { useTranslation } from 'react-i18next';
 export default function SuggestionChip({ suggestion, onAccept }) {
   const { t } = useTranslation();
 
-  const text =
-    suggestion.kind === 'MIT_RISK_DOMAIN'
-      ? t('Filter to MIT: {{label}}?', { label: suggestion.label })
-      : t('Only incidents involving {{label}}?', { label: suggestion.label });
+  const text = t('Only incidents involving {{label}}?', { label: suggestion.label });
 
   return (
     <button

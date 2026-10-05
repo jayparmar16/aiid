@@ -4,7 +4,6 @@ import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faXmark } from '@fortawesome/free-solid-svg-icons';
 import DateRangeChip from './DateRangeChip';
 import InclusionChip from './InclusionChip';
-import MitRiskDomainChip from './MitRiskDomainChip';
 import SuggestionChip from './SuggestionChip';
 import { constraintName, counted, entityList } from './constraintText';
 
@@ -45,7 +44,6 @@ const chips = {
   INCLUDE_ENTITY: InclusionChip,
   HARMED_PARTY: InclusionChip,
   DATE_RANGE: DateRangeChip,
-  MIT_RISK_DOMAIN: MitRiskDomainChip,
 };
 
 // Why a filter could not be applied, by warning code. Anything else is an unrecognised exclusion.
@@ -54,7 +52,6 @@ const warningTexts = {
   UNRECOGNISED_INCLUSION:
     'Could not filter by “{{text}}”: nothing involved in an incident has that name.',
   INVALID_DATE: 'Could not filter by “{{text}}”: dates are written as YYYY-MM-DD.',
-  UNKNOWN_MIT_DOMAIN: 'Could not filter to “{{text}}”: it is not an MIT risk domain.',
 };
 
 /**

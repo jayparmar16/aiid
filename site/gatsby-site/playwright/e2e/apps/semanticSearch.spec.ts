@@ -18,7 +18,6 @@ const withDefaults = (interpretation: any) => ({
     roles: null,
     dateFrom: null,
     dateTo: null,
-    mitRiskDomain: null,
     ...constraint,
   })),
 });
@@ -573,7 +572,6 @@ test.describe('Semantic Search', () => {
             { entity_id: 'uber', name: 'Uber' },
             { entity_id: 'waymo', name: 'Waymo' },
           ],
-          mitRiskDomains: [],
           earliestDate: '1983-01-01',
           latestDate: '2026-09-30',
         },
@@ -798,146 +796,6 @@ test.describe('Semantic Search', () => {
     expect(workbook.Results[1].slice(0, 2)).toEqual(['', '7']);
   });
 
-  test('filters by MIT risk domains from the control and from suggestions', async ({
-    page,
-    login,
-  }) => {
-    await login({ customData: { roles: ['subscriber'] } });
-
-    const misinformation = '3. Misinformation';
-    const privacy = '2. Privacy & Security';
-
-    const facets = {
-      data: {
-        semanticSearchFacets: {
-          harmedEntities: [],
-          responsibleEntities: [],
-          mitRiskDomains: [
-            '1. Discrimination and Toxicity',
-            privacy,
-            misinformation,
-            '4. Malicious Actors & Misuse',
-            '5. Human-Computer Interaction',
-            '6. Socioeconomic & Environmental Harms',
-            '7. AI system safety, failures, and limitations',
-          ],
-          earliestDate: '1983-09-26',
-          latestDate: '2026-09-30',
-        },
-      },
-    };
-
-    const mit = (domain: string, incidentCount: number) => ({
-      kind: 'MIT_RISK_DOMAIN',
-      source: 'EXPLICIT_FILTER',
-      matchedText: domain,
-      mitRiskDomain: domain,
-      incidentCount,
-      entities: [],
-    });
-
-    const readAs = (constraints: unknown[], suggestions: unknown[] = []) => ({
-      semanticText: 'election misinformation',
-      constraints,
-      warnings: [],
-      suggestions,
-    });
-
-    // The words only suggest the domain. Each later reply applies the domains sent back.
-    const replies = [
-      readAs([], [{ kind: 'MIT_RISK_DOMAIN', value: misinformation, label: 'Misinformation' }]),
-      readAs([mit(misinformation, 196)]),
-      readAs([mit(misinformation, 196), mit(privacy, 112)]),
-      readAs([mit(privacy, 112)]),
-      readAs([]),
-    ];
-    const requests: unknown[] = [];
-
-    await page.route('**/graphql', async (route) => {
-      const request = route.request().postDataJSON();
-
-      if (request.operationName === 'SemanticSearchFacets') {
-        await route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify(facets),
-        });
-        return;
-      }
-
-      if (request.operationName !== 'SemanticSearch') {
-        await route.continue();
-        return;
-      }
-
-      requests.push(request.variables);
-
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify(response('OK', results.slice(0, 2), replies[requests.length - 1])),
-      });
-    });
-
-    await page.goto(url);
-
-    const input = page.locator('[data-cy="semantic-search-input"]');
-    const suggestion = page.locator('[data-cy="semantic-search-suggestion"]');
-    const chip = page.locator('[data-cy="semantic-search-mit-domain"]');
-    const option = (domain: string) =>
-      page.locator(`[data-cy="semantic-search-mit-domain-option"][value="${domain}"]`);
-
-    await expect(page.locator('[data-cy="semantic-search-mit-domain-option"]')).toHaveCount(7);
-
-    await input.fill('election misinformation');
-    await page.locator('[data-cy="semantic-search-submit"]').click();
-
-    await expect(suggestion).toHaveText('Filter to MIT: Misinformation?');
-    await expect(chip).toHaveCount(0);
-    await expect(input).toHaveValue('election misinformation');
-
-    await suggestion.click();
-
-    await expect(chip).toHaveCount(1);
-    await expect(chip).toContainText('MIT: Misinformation');
-    await expect(chip).toContainText('196 incidents');
-    await expect(suggestion).toHaveCount(0);
-    await expect(option(misinformation)).toBeChecked();
-
-    await option(privacy).check();
-
-    await expect(chip).toHaveCount(2);
-    await expect(chip.nth(1)).toContainText('MIT: Privacy & Security');
-
-    // Removing a chip unticks its domain in the control.
-    await chip
-      .filter({ hasText: 'Misinformation' })
-      .locator('[data-cy="semantic-search-remove-constraint"]')
-      .click();
-
-    await expect(chip).toHaveCount(1);
-    await expect(option(misinformation)).not.toBeChecked();
-    await expect(option(privacy)).toBeChecked();
-
-    await option(privacy).uncheck();
-
-    await expect(chip).toHaveCount(0);
-
-    const query = 'election misinformation';
-    const noEntities = { excludeEntities: [], excludeNames: [] };
-
-    // Unticking the last domain searches with the first search's variables again, which Apollo's
-    // cache answers without another request.
-    await expect
-      .poll(() => requests)
-      .toEqual([
-        { query, filters: noEntities },
-        { query, filters: { ...noEntities, mitRiskDomains: [misinformation] } },
-        { query, filters: { ...noEntities, mitRiskDomains: [misinformation, privacy] } },
-        { query, filters: { ...noEntities, mitRiskDomains: [privacy] } },
-      ]);
-  });
-
   test('limits a search to a period typed in the query or set in the date control', async ({
     page,
     login,
@@ -949,7 +807,6 @@ test.describe('Semantic Search', () => {
         semanticSearchFacets: {
           harmedEntities: [],
           responsibleEntities: [],
-          mitRiskDomains: [],
           earliestDate: '1983-09-26',
           latestDate: '2026-09-30',
         },
@@ -1293,7 +1150,6 @@ test.describe('Semantic Search', () => {
             { entity_id: 'students', name: 'Students' },
             { entity_id: 'tesla-drivers', name: 'Tesla drivers' },
           ],
-          mitRiskDomains: [],
           earliestDate: '1983-01-01',
           latestDate: '2026-09-30',
         },
