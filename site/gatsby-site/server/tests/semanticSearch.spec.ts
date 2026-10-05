@@ -377,7 +377,7 @@ describe('semanticSearch exclusions', () => {
     query: string,
     variables: {
       limit?: number;
-      filters?: { excludeEntities?: string[]; excludeNames?: string[] };
+      filters?: { excludeEntities?: string[]; excludeNames?: string[]; dateFrom?: string };
     } = {}
   ) =>
     makeRequest(url, {
@@ -720,7 +720,8 @@ describe('semanticSearch exclusions', () => {
     });
 
     expect(explicit.body.errors).toBeUndefined();
-    expect(embedded).toEqual(['self-driving car incidents', 'self-driving car incidents']);
+    // The same text is embedded once: later searches reuse its vector.
+    expect(embedded).toEqual(['self-driving car incidents']);
     expect(resultIds(explicit)).toEqual([12, 13, 15]);
     expect(interpretationOf(explicit)).toEqual({
       semanticText: 'self-driving car incidents',
@@ -796,7 +797,8 @@ describe('semanticSearch exclusions', () => {
       filters: { excludeNames: constraints.map((constraint: any) => constraint.matchedText) },
     });
 
-    expect(embedded).toEqual(['crashes', 'crashes']);
+    // The same text is embedded once: later searches reuse its vector.
+    expect(embedded).toEqual(['crashes']);
     expect(interpretationOf(held)).toEqual({
       semanticText: 'crashes',
       warnings: [],
@@ -1392,6 +1394,142 @@ describe('semanticSearch exclusions', () => {
     });
   });
 
+  describe('every result, quickly', () => {
+    it('returns every match when no limit is given, however many there are', async () => {
+      const ids = Array.from({ length: 130 }, (_, index) => 100 + index);
+
+      await seedCollection({
+        name: 'incidents',
+        docs: ids.map((id) => incident(id, `Crash ${id}`, {})),
+      });
+      await seedCollection({
+        name: 'incident_embeddings',
+        docs: ids.map((id) => vectors(id, [1, 0])),
+      });
+      embedAs([1, 0]);
+
+      const ranked = await search('crashes');
+
+      expect(resultIds(ranked)).toHaveLength(130);
+      expect(ranked.body.data.semanticSearch.totalCount).toBe(130);
+
+      // Listed newest first, as a search with only a filter is.
+      const listed = await search('', { filters: { dateFrom: '2000-01-01' } });
+
+      expect(resultIds(listed)).toHaveLength(130);
+      expect(listed.body.data.semanticSearch.totalCount).toBe(130);
+    });
+
+    it('embeds a text once, whatever its case and spacing, and again only after a reset', async () => {
+      embedAs([1, 0]);
+
+      await search('Self-driving crashes');
+      await search('self-driving   CRASHES excluding tesla');
+      await search('self-driving crashes', { filters: { excludeEntities: ['uber'] } });
+
+      expect(embedded).toEqual(['Self-driving crashes']);
+
+      resetSemanticSearchCache();
+      await search('self-driving crashes');
+
+      expect(embedded).toEqual(['Self-driving crashes', 'self-driving crashes']);
+    });
+
+    it('does not keep a failed embedding, so the next search asks again', async () => {
+      stubEmbedding(async () => new Response('unavailable', { status: 503 }));
+
+      expect((await search('crashes')).body.data.semanticSearch.status).toBe('UNAVAILABLE');
+
+      embedAs([1, 0]);
+
+      expect((await search('crashes')).body.data.semanticSearch.status).toBe('OK');
+      expect(embedded).toEqual(['crashes', 'crashes']);
+    });
+
+    it('gives each result the picture of its earliest report that has one', async () => {
+      await seedCollection({
+        name: 'incidents',
+        docs: [
+          incident(10, 'Its second report has the first picture', {}, [202, 201, 203]),
+          incident(11, 'Only an image link', {}, [204]),
+          incident(12, 'No pictures', {}, [205]),
+        ],
+      });
+      await seedCollection({
+        name: 'reports',
+        docs: [
+          { report_number: 201, cloudinary_id: '', image_url: '' },
+          {
+            report_number: 202,
+            cloudinary_id: 'reports/second.jpg',
+            image_url: 'https://example.com/second.jpg',
+          },
+          { report_number: 203, cloudinary_id: 'reports/third.jpg', image_url: '' },
+          { report_number: 204, image_url: 'https://example.com/link.jpg' },
+          { report_number: 205, cloudinary_id: null, image_url: null },
+        ],
+      });
+      embedAs([1, 0]);
+
+      const response = await makeRequest(url, {
+        query: `
+          query SemanticSearch($query: String!) {
+            semanticSearch(query: $query) {
+              results { incident { incident_id } image { cloudinary_id image_url } }
+            }
+          }
+        `,
+        variables: { query: 'crashes' },
+      });
+
+      expect(response.body.errors).toBeUndefined();
+      expect(response.body.data.semanticSearch.results).toEqual([
+        {
+          incident: { incident_id: 10 },
+          image: {
+            cloudinary_id: 'reports/second.jpg',
+            image_url: 'https://example.com/second.jpg',
+          },
+        },
+        {
+          incident: { incident_id: 11 },
+          image: { cloudinary_id: null, image_url: 'https://example.com/link.jpg' },
+        },
+        { incident: { incident_id: 12 }, image: null },
+      ]);
+    });
+
+    it("loads an incident's stored embedding when asked for it, also through a fragment", async () => {
+      await seedCollection({
+        name: 'incidents',
+        docs: [
+          { ...incident(10, 'Has a stored embedding', {}), embedding: { vector: [0.5, 0.5] } },
+        ],
+      });
+      embedAs([1, 0]);
+
+      const response = await makeRequest(url, {
+        query: `
+          query SemanticSearch($query: String!) {
+            semanticSearch(query: $query) {
+              results { incident { incident_id ...Stored } }
+            }
+          }
+
+          fragment Stored on Incident {
+            embedding { vector }
+          }
+        `,
+        variables: { query: 'crashes' },
+      });
+
+      expect(response.body.errors).toBeUndefined();
+      expect(response.body.data.semanticSearch.results).toEqual([
+        { incident: { incident_id: 10, embedding: { vector: [0.5, 0.5] } } },
+      ]);
+    });
+  });
+
   describe('query reading fixes', () => {
     // Far from the real date, so a relative phrase that ignored the clock would fail.
     const now = new Date('2024-07-15T12:00:00Z');
@@ -1613,7 +1751,8 @@ describe('semanticSearch exclusions', () => {
         { entity_id: 'meta', name: 'Meta', matchedBy: 'LINK' },
       ]);
       expect(resultIds(facebook)).toEqual([10, 11, 12, 13, 15, 22, 23, 24]);
-      expect(embedded).toEqual(['social media harms', 'social media harms']);
+      // The same text is embedded once: later searches reuse its vector.
+      expect(embedded).toEqual(['social media harms']);
     });
 
     it('follows one link and no further', async () => {
@@ -1944,7 +2083,8 @@ describe('semanticSearch exclusions', () => {
       ]);
       expect(resultIds(byRole)).toEqual([]);
       expect(resultIds(excluding)).toEqual([40, 41]);
-      expect(embedded).toEqual(['failures', 'failures', 'failures', 'failures']);
+      // The same text is embedded once: later searches reuse its vector.
+      expect(embedded).toEqual(['failures']);
     });
 
     it('keeps only incidents that satisfy every group, with exclusions applied last', async () => {
@@ -2053,7 +2193,8 @@ describe('semanticSearch exclusions', () => {
 
       const accepted = await searchFor(query, { filters: { include: [{ entityId: 'google' }] } });
 
-      expect(embedded).toEqual([query, query]);
+      // The same text is embedded once: later searches reuse its vector.
+      expect(embedded).toEqual([query]);
       expect(constraintsOf(accepted)).toEqual([
         {
           kind: 'INCLUDE_ENTITY',
@@ -2082,7 +2223,8 @@ describe('semanticSearch exclusions', () => {
         },
       });
 
-      expect(embedded).toEqual(['chatbot failures', 'chatbot failures']);
+      // The same text is embedded once: later searches reuse its vector.
+      expect(embedded).toEqual(['chatbot failures']);
       expect(interpretationOf(held)).toEqual({
         ...interpretationOf(typed),
         constraints: constraints.map((constraint: any) => ({

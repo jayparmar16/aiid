@@ -1,6 +1,7 @@
 import * as Sentry from '@sentry/aws-serverless';
 import { Binary } from 'mongodb';
 import {
+  FieldNode,
   GraphQLEnumType,
   GraphQLError,
   GraphQLFieldConfigMap,
@@ -10,7 +11,10 @@ import {
   GraphQLList,
   GraphQLNonNull,
   GraphQLObjectType,
+  GraphQLResolveInfo,
   GraphQLString,
+  Kind,
+  SelectionSetNode,
 } from 'graphql';
 import { allow } from 'graphql-shield';
 import {
@@ -38,8 +42,7 @@ const EMBEDDING_SCHEMA_VERSION = 2;
 const MAX_QUERY_CHARS = 500;
 const MAX_ENTITY_FILTERS = 20;
 const MAX_SUGGESTIONS = 3;
-const DEFAULT_LIMIT = 25;
-const MAX_LIMIT = 100;
+const MAX_CACHED_QUERY_VECTORS = 500;
 const MIN_SCORE = 0.15;
 const OVERVIEW_WEIGHT = 0.65;
 const PASSAGE_WEIGHT = 0.35;
@@ -58,6 +61,16 @@ const SemanticSearchStatusType = new GraphQLEnumType({
   },
 });
 
+const SemanticSearchImageType = new GraphQLObjectType({
+  name: 'SemanticSearchImage',
+  description:
+    'The picture shown for an incident, taken from the earliest of its reports that has one.',
+  fields: {
+    cloudinary_id: { type: GraphQLString },
+    image_url: { type: GraphQLString },
+  },
+});
+
 const SemanticSearchResultType = new GraphQLObjectType({
   name: 'SemanticSearchResult',
   fields: {
@@ -67,6 +80,10 @@ const SemanticSearchResultType = new GraphQLObjectType({
         'Weighted cosine similarity across the incident overview and best passage. Null when nothing was left to rank by meaning and results are listed newest first.',
     },
     incident: { type: new GraphQLNonNull(IncidentType) },
+    image: {
+      type: SemanticSearchImageType,
+      description: "Null when none of the incident's reports has a picture.",
+    },
   },
 });
 
@@ -558,12 +575,36 @@ type Embedded =
   | { model: string; profileId: string; vector: number[] }
   | { status: 'QUOTA_EXHAUSTED' | 'UNAVAILABLE' };
 
+/**
+ * Query vectors already embedded on this warm function, by embedding profile and text, least
+ * recently used first. They are held in memory only, so no search text is ever stored. Changing a
+ * filter keeps the same text to embed, so it reuses the vector instead of waiting on the provider.
+ */
+const queryVectors = new Map<string, number[]>();
+
+cacheResets.push(() => queryVectors.clear());
+
 const embedQuery = async (query: string): Promise<Embedded> => {
   try {
     const provider = createEmbeddingProvider({ maxAttempts: 1, timeoutMs: EMBED_TIMEOUT_MS });
-    const { vectors } = await provider.embed([query], 'query');
 
-    return { model: provider.model, profileId: provider.profileId, vector: vectors[0] };
+    // Case and spacing barely move a vector, so texts differing only in them share one.
+    const key = `${provider.profileId}\n${query.toLowerCase().replace(/\s+/g, ' ')}`;
+
+    let vector = queryVectors.get(key);
+
+    if (vector) {
+      queryVectors.delete(key);
+    } else {
+      [vector] = (await provider.embed([query], 'query')).vectors;
+    }
+
+    queryVectors.set(key, vector);
+    if (queryVectors.size > MAX_CACHED_QUERY_VECTORS) {
+      queryVectors.delete(queryVectors.keys().next().value!);
+    }
+
+    return { model: provider.model, profileId: provider.profileId, vector };
   } catch (error) {
     Sentry.captureException(error);
 
@@ -574,11 +615,56 @@ const embedQuery = async (query: string): Promise<Embedded> => {
   }
 };
 
+interface ResultImage {
+  cloudinary_id: string | null;
+  image_url: string | null;
+}
+
+interface SearchResult {
+  score: number | null;
+  incident: DBIncident;
+  image?: ResultImage | null;
+}
+
 interface SearchResponse {
   status: 'OK' | 'QUOTA_EXHAUSTED' | 'UNAVAILABLE';
-  results: { score: number | null; incident: DBIncident }[];
+  results: SearchResult[];
   totalCount: number;
 }
+
+/** What a request asks of each result, so nothing it leaves out is loaded. */
+interface Wanted {
+  /** Each incident's stored legacy embedding, by far its largest field. */
+  incidentEmbedding: boolean;
+  image: boolean;
+}
+
+/** The names of the fields a request selects at a path below this field, fragments included. */
+const fieldsSelectedAt = (info: GraphQLResolveInfo, path: string[]): Set<string> => {
+  const fieldsIn = (selectionSet?: SelectionSetNode): FieldNode[] =>
+    (selectionSet?.selections ?? []).flatMap((selection) => {
+      if (selection.kind === Kind.FIELD) return [selection];
+      if (selection.kind === Kind.INLINE_FRAGMENT) return fieldsIn(selection.selectionSet);
+      return fieldsIn(info.fragments[selection.name.value]?.selectionSet);
+    });
+
+  let fields: readonly FieldNode[] = info.fieldNodes;
+
+  for (const name of path) {
+    fields = fields
+      .flatMap((field) => fieldsIn(field.selectionSet))
+      .filter((field) => field.name.value === name);
+  }
+
+  return new Set(
+    fields.flatMap((field) => fieldsIn(field.selectionSet)).map((field) => field.name.value)
+  );
+};
+
+const wantedBy = (info: GraphQLResolveInfo): Wanted => ({
+  incidentEmbedding: fieldsSelectedAt(info, ['results', 'incident']).has('embedding'),
+  image: fieldsSelectedAt(info, ['results']).has('image'),
+});
 
 const noResults = (status: SearchResponse['status']): SearchResponse => ({
   status,
@@ -586,12 +672,18 @@ const noResults = (status: SearchResponse['status']): SearchResponse => ({
   totalCount: 0,
 });
 
-/** The incidents with these ids, in the order given, skipping any that no longer exist. */
-const findIncidents = async (context: Context, incidentIds: number[]) => {
+/**
+ * The incidents with these ids, in the order given, skipping any that no longer exist. The legacy
+ * embedding is most of an incident's size, so it is loaded only when asked for.
+ */
+const findIncidents = async (context: Context, incidentIds: number[], wanted: Wanted) => {
   const incidents = await context.client
     .db('aiidprod')
     .collection<DBIncident>('incidents')
-    .find({ incident_id: { $in: incidentIds } })
+    .find(
+      { incident_id: { $in: incidentIds } },
+      wanted.incidentEmbedding ? {} : { projection: { embedding: 0 } }
+    )
     .toArray();
   const byId = new Map(incidents.map((incident) => [incident.incident_id, incident]));
 
@@ -602,11 +694,65 @@ const findIncidents = async (context: Context, incidentIds: number[]) => {
   });
 };
 
+/**
+ * Each incident's picture, from the earliest of its reports that has one, found in one query for
+ * all of them. An incident without one maps to null.
+ */
+const findImages = async (context: Context, incidents: DBIncident[]) => {
+  const reports = await context.client
+    .db('aiidprod')
+    .collection('reports')
+    .find(
+      {
+        report_number: { $in: incidents.flatMap((incident) => incident.reports ?? []) },
+        $or: [{ cloudinary_id: { $nin: [null, ''] } }, { image_url: { $nin: [null, ''] } }],
+      },
+      { projection: { _id: 0, report_number: 1, cloudinary_id: 1, image_url: 1 } }
+    )
+    .toArray();
+
+  const withImage = new Map(reports.map((report) => [report.report_number, report]));
+
+  return new Map(
+    incidents.map((incident): [number, ResultImage | null] => {
+      const earliest = [...(incident.reports ?? [])]
+        .sort((left, right) => left - right)
+        .map((reportNumber) => withImage.get(reportNumber))
+        .find(Boolean);
+
+      return [
+        incident.incident_id,
+        earliest
+          ? { cloudinary_id: earliest.cloudinary_id || null, image_url: earliest.image_url || null }
+          : null,
+      ];
+    })
+  );
+};
+
+/** The results for these incidents in the order given, with only what the request asks for. */
+const loadResults = async (
+  context: Context,
+  incidentIds: number[],
+  scoreOf: (incidentId: number) => number | null,
+  wanted: Wanted
+): Promise<SearchResult[]> => {
+  const incidents = await findIncidents(context, incidentIds, wanted);
+  const images = wanted.image ? await findImages(context, incidents) : null;
+
+  return incidents.map((incident) => ({
+    score: scoreOf(incident.incident_id),
+    incident,
+    ...(images && { image: images.get(incident.incident_id) }),
+  }));
+};
+
 /** Embeds the semantic text and returns the allowed incidents that are closest to it in meaning. */
 const searchByMeaning = async (
   context: Context,
   semanticText: string,
   limit: number,
+  wanted: Wanted,
   allowedIncidentIds?: ReadonlySet<number>
 ): Promise<SearchResponse> => {
   const embedded = await embedQuery(semanticText);
@@ -632,19 +778,14 @@ const searchByMeaning = async (
     );
     const hits = ranked.slice(0, limit);
     const scores = new Map(hits.map((hit) => [hit.incident_id, hit.score]));
-    const incidents = await findIncidents(
+    const results = await loadResults(
       context,
-      hits.map((hit) => hit.incident_id)
+      hits.map((hit) => hit.incident_id),
+      (incidentId) => scores.get(incidentId)!,
+      wanted
     );
 
-    return {
-      status: 'OK',
-      results: incidents.map((incident) => ({
-        score: scores.get(incident.incident_id)!,
-        incident,
-      })),
-      totalCount: ranked.length,
-    };
+    return { status: 'OK', results, totalCount: ranked.length };
   } catch (error) {
     Sentry.captureException(error);
     return noResults('UNAVAILABLE');
@@ -660,20 +801,17 @@ const listNewestFirst = async (
   context: Context,
   facts: IncidentFacts,
   allowedIncidentIds: ReadonlySet<number>,
-  limit: number
+  limit: number,
+  wanted: Wanted
 ): Promise<SearchResponse> => {
   const newest = Array.from(allowedIncidentIds)
     .sort((left, right) => facts.dateOf(right).localeCompare(facts.dateOf(left)) || right - left)
     .slice(0, limit);
 
   try {
-    const incidents = await findIncidents(context, newest);
+    const results = await loadResults(context, newest, () => null, wanted);
 
-    return {
-      status: 'OK',
-      results: incidents.map((incident) => ({ score: null, incident })),
-      totalCount: allowedIncidentIds.size,
-    };
+    return { status: 'OK', results, totalCount: allowedIncidentIds.size };
   } catch (error) {
     Sentry.captureException(error);
     return noResults('UNAVAILABLE');
@@ -1018,15 +1156,17 @@ export const queryFields: GraphQLFieldConfigMap<any, Context> = {
         type: new GraphQLNonNull(GraphQLString),
         description: 'May be empty when filters are given.',
       },
-      limit: { type: GraphQLInt, defaultValue: DEFAULT_LIMIT },
+      limit: {
+        type: GraphQLInt,
+        description: 'At most this many results. Every match is returned when it is left out.',
+      },
       filters: { type: SemanticSearchFiltersInput },
     },
-    resolve: async (_source, args, context) => {
+    resolve: async (_source, args, context, info) => {
       const query = String(args.query).trim().slice(0, MAX_QUERY_CHARS);
-      const limit = Math.min(
-        Math.max(Math.trunc(Number(args.limit) || DEFAULT_LIMIT), 1),
-        MAX_LIMIT
-      );
+      const limit =
+        args.limit == null ? Infinity : Math.max(Math.trunc(Number(args.limit)) || 1, 1);
+      const wanted = wantedBy(info);
       const filters: SemanticSearchFilters = args.filters ?? {};
       const entityFilterCount =
         (filters.excludeEntities?.length ?? 0) +
@@ -1074,13 +1214,19 @@ export const queryFields: GraphQLFieldConfigMap<any, Context> = {
 
       if (!semanticText) {
         const response = allowedIncidentIds
-          ? await listNewestFirst(context, facts, allowedIncidentIds, limit)
+          ? await listNewestFirst(context, facts, allowedIncidentIds, limit, wanted)
           : noResults('OK');
 
         return { ...response, interpretation };
       }
 
-      const response = await searchByMeaning(context, semanticText, limit, allowedIncidentIds);
+      const response = await searchByMeaning(
+        context,
+        semanticText,
+        limit,
+        wanted,
+        allowedIncidentIds
+      );
 
       return { ...response, interpretation };
     },

@@ -40,15 +40,9 @@ const results = Array.from({ length: 30 }, (_, index) => ({
     title: `Incident ${index + 1}`,
     date: '2026-01-01',
     description: index === 0 ? 'Description, "quoted"\nline' : `Description ${index + 1}`,
-    // Only the first incident has a picture, on its second report.
-    reports:
-      index === 0
-        ? [
-            { report_number: 2, cloudinary_id: 'reports/example.jpg', image_url: '' },
-            { report_number: 1, cloudinary_id: '', image_url: '' },
-          ]
-        : [],
   },
+  // Only the first incident has a picture.
+  image: index === 0 ? { cloudinary_id: 'reports/example.jpg', image_url: null } : null,
 }));
 
 const xmlParser = new XMLParser({
@@ -799,7 +793,8 @@ test.describe('Semantic Search', () => {
       { incident_id: 9, title: 'Oldest incident', date: '2019-11-01' },
     ].map((incident) => ({
       score: null,
-      incident: { ...incident, description: incident.title, reports: [] },
+      incident: { ...incident, description: incident.title },
+      image: null,
     }));
 
     await page.route('**/graphql', async (route) => {

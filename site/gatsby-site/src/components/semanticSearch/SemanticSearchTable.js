@@ -78,24 +78,17 @@ function ScoreHeader({ column }) {
   );
 }
 
-// The incident's picture, from its earliest report that has one, the way incident cards choose it.
-const imageOf = (reports) => {
-  const report = [...(reports ?? [])]
-    .sort((left, right) => left.report_number - right.report_number)
-    .find((report) => report.cloudinary_id || report.image_url);
-
-  if (!report) return null;
-
-  return report.cloudinary_id || `legacy/${md5(report.image_url)}`;
-};
+// Where an image is stored, the way incident cards find it: by its id, or by its original address.
+const publicIdOf = (image) =>
+  image && (image.cloudinary_id || (image.image_url && `legacy/${md5(image.image_url)}`));
 
 // A small thumbnail linking to the incident, or a plain box of the same size when it has no image.
 function ImageCell({ row }) {
   const { t } = useTranslation();
 
-  const { incident_id, title, reports } = row.original;
+  const { incident_id, title, image } = row.original;
 
-  const publicID = imageOf(reports);
+  const publicID = publicIdOf(image);
 
   return (
     <Link to={`/cite/${incident_id}`} className="block w-24" data-cy="semantic-search-image">
@@ -126,7 +119,7 @@ export default function SemanticSearchTable({ results }) {
   const { t } = useTranslation();
 
   const data = React.useMemo(
-    () => results.map(({ score, incident }) => ({ score, ...incident })),
+    () => results.map(({ score, incident, image }) => ({ score, image, ...incident })),
     [results]
   );
 

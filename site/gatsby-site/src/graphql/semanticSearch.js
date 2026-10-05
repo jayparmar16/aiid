@@ -12,11 +12,10 @@ export const SEMANTIC_SEARCH = gql(`
           title
           date
           description
-          reports {
-            report_number
-            cloudinary_id
-            image_url
-          }
+        }
+        image {
+          cloudinary_id
+          image_url
         }
       }
       interpretation {
