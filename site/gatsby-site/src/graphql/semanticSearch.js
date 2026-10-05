@@ -21,7 +21,10 @@ export const SEMANTIC_SEARCH = gql(`
           source
           matchedText
           roles
+          mitRiskDomain
           incidentCount
+          dateFrom
+          dateTo
           entities {
             entity_id
             name
@@ -53,6 +56,9 @@ export const SEMANTIC_SEARCH_FACETS = gql(`
         entity_id
         name
       }
+      earliestDate
+      latestDate
+      mitRiskDomains
     }
   }
 `);

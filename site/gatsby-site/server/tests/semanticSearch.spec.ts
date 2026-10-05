@@ -6,6 +6,7 @@ import {
   normaliseBinaryVector,
   rankIncidentVectors,
   resetSemanticSearchCache,
+  semanticSearchClock,
 } from '../fields/semanticSearch';
 import {
   makeRequest,
@@ -1075,6 +1076,296 @@ describe('semanticSearch exclusions', () => {
     });
   });
 
+  describe('date ranges', () => {
+    // Far from the real date, so a relative phrase that ignored the clock would fail.
+    const now = new Date('2024-07-15T12:00:00Z');
+
+    beforeEach(() => {
+      jest.spyOn(semanticSearchClock, 'now').mockReturnValue(now);
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    const searchDates = (
+      query: string,
+      filters: {
+        excludeEntities?: string[];
+        excludeNames?: string[];
+        dateFrom?: string | null;
+        dateTo?: string | null;
+      } = {}
+    ) =>
+      makeRequest(url, {
+        query: `
+          query SemanticSearch($query: String!, $filters: SemanticSearchFilters) {
+            semanticSearch(query: $query, filters: $filters) {
+              status
+              totalCount
+              results { score incident { incident_id } }
+              interpretation {
+                semanticText
+                constraints {
+                  kind
+                  source
+                  matchedText
+                  incidentCount
+                  dateFrom
+                  dateTo
+                  entities { entity_id }
+                }
+                warnings { code text }
+              }
+            }
+          }
+        `,
+        variables: { query, filters },
+      });
+
+    const dateRanges = (response: any) =>
+      interpretationOf(response).constraints.filter(
+        (constraint: any) => constraint.kind === 'DATE_RANGE'
+      );
+
+    // Newest first, the fixtures run 15 and 13 (2024-05-10), 11 (2023-06-01), 14 (2021-01-01),
+    // 10 (2018-03-23) and 12 (2018-03-18).
+    it.each([
+      ['incidents since 2021', 'since 2021', '2021-01-01', null, [15, 13, 11, 14]],
+      ['incidents from 2022', 'from 2022', '2022-01-01', null, [15, 13, 11]],
+      ['incidents after 2021', 'after 2021', '2022-01-01', null, [15, 13, 11]],
+      ['incidents before 2021', 'before 2021', null, '2020-12-31', [10, 12]],
+      ['incidents in 2018', 'in 2018', '2018-01-01', '2018-12-31', [10, 12]],
+      [
+        'incidents between 2021 and 2023',
+        'between 2021 and 2023',
+        '2021-01-01',
+        '2023-12-31',
+        [11, 14],
+      ],
+      ['incidents from 2021 to 2023', 'from 2021 to 2023', '2021-01-01', '2023-12-31', [11, 14]],
+      ['incidents from 2023 to 2021', 'from 2023 to 2021', '2021-01-01', '2023-12-31', [11, 14]],
+      ['incidents 2021-2023', '2021-2023', '2021-01-01', '2023-12-31', [11, 14]],
+      ['incidents 2021–2023', '2021–2023', '2021-01-01', '2023-12-31', [11, 14]],
+      ['incidents in 2021 - 2023', 'in 2021 - 2023', '2021-01-01', '2023-12-31', [11, 14]],
+      ['incidents this year', 'this year', '2024-01-01', '2024-12-31', [15, 13]],
+      ['incidents last year', 'last year', '2023-01-01', '2023-12-31', [11]],
+      ['incidents past 3 years', 'past 3 years', '2021-07-15', '2024-07-15', [15, 13, 11]],
+      [
+        'incidents in the last 4 years',
+        'in the last 4 years',
+        '2020-07-15',
+        '2024-07-15',
+        [15, 13, 11, 14],
+      ],
+    ])(
+      'reads %p as a date range and lists its incidents newest first',
+      async (query, matchedText, dateFrom, dateTo, ids) => {
+        embedAs([1, 0]);
+
+        const response = await searchDates(query);
+
+        expect(response.body.errors).toBeUndefined();
+        expect(embedded).toEqual([]);
+        expect(interpretationOf(response)).toEqual({
+          semanticText: '',
+          warnings: [],
+          constraints: [
+            {
+              kind: 'DATE_RANGE',
+              source: 'QUERY_TEXT',
+              matchedText,
+              dateFrom,
+              dateTo,
+              incidentCount: (ids as number[]).length,
+              entities: [],
+            },
+          ],
+        });
+        expect(resultIds(response)).toEqual(ids);
+        expect(response.body.data.semanticSearch.totalCount).toBe((ids as number[]).length);
+      }
+    );
+
+    it('ranks only incidents in the range and embeds the query without its date', async () => {
+      embedAs([1, 0]);
+
+      const response = await searchDates('self-driving crashes since 2023');
+
+      expect(embedded).toEqual(['self-driving crashes']);
+      expect(interpretationOf(response).semanticText).toBe('self-driving crashes');
+      // 10 and 12 score higher than all of these, but are dated 2018.
+      expect(resultIds(response)).toEqual([11, 13, 15]);
+    });
+
+    it('ends an exclusion where a date phrase begins', async () => {
+      embedAs([1, 0]);
+
+      const weak = await searchDates('self-driving crashes not tesla since 2020');
+      const unrecognised = await searchDates('crashes excluding robocall operators in 2018');
+
+      expect(embedded).toEqual(['self-driving crashes', 'crashes']);
+      expect(excludedIds(weak)).toEqual([
+        ['tesla', 'tesla-autopilot', 'tesla-full-self-driving-(fsd)'],
+        [],
+      ]);
+      expect(dateRanges(weak)).toEqual([expect.objectContaining({ dateFrom: '2020-01-01' })]);
+      // 11 is Tesla's and 14 scores below the minimum.
+      expect(resultIds(weak)).toEqual([13, 15]);
+
+      expect(interpretationOf(unrecognised).warnings).toEqual([
+        { code: 'UNRECOGNISED_EXCLUSION', text: 'robocall operators' },
+      ]);
+      expect(resultIds(unrecognised)).toEqual([10, 12]);
+    });
+
+    it('keeps only the dates every typed date phrase allows', async () => {
+      embedAs([1, 0]);
+
+      const response = await searchDates('incidents since 2019, before 2024');
+
+      expect(dateRanges(response)).toEqual([
+        expect.objectContaining({
+          matchedText: 'since 2019, before 2024',
+          dateFrom: '2019-01-01',
+          dateTo: '2023-12-31',
+        }),
+      ]);
+      expect(resultIds(response)).toEqual([11, 14]);
+    });
+
+    it.each(['crashes in 1899', 'crashes since 2101', 'crashes in 20234', 'crashes past 0 years'])(
+      'leaves %p to be ranked by meaning, since it names no usable year',
+      async (query) => {
+        embedAs([1, 0]);
+
+        const response = await searchDates(query);
+
+        expect(embedded).toEqual([query]);
+        expect(interpretationOf(response).constraints).toEqual([]);
+      }
+    );
+
+    it('applies an explicit date range, without embedding an empty query', async () => {
+      embedAs([1, 0]);
+
+      const both = await searchDates('', { dateFrom: '2021-01-01', dateTo: '2023-12-31' });
+      const fromOnly = await searchDates('', { dateFrom: '2024-01-01' });
+
+      expect(embedded).toEqual([]);
+      expect(interpretationOf(both).constraints).toEqual([
+        {
+          kind: 'DATE_RANGE',
+          source: 'EXPLICIT_FILTER',
+          matchedText: null,
+          dateFrom: '2021-01-01',
+          dateTo: '2023-12-31',
+          incidentCount: 2,
+          entities: [],
+        },
+      ]);
+      expect(resultIds(both)).toEqual([11, 14]);
+      expect(dateRanges(fromOnly)).toEqual([
+        expect.objectContaining({ dateFrom: '2024-01-01', dateTo: null }),
+      ]);
+      expect(resultIds(fromOnly)).toEqual([15, 13]);
+    });
+
+    it('replaces an explicit date range with one typed in the query', async () => {
+      embedAs([1, 0]);
+
+      const response = await searchDates('incidents in 2018', { dateFrom: '2021-01-01' });
+      const overInvalid = await searchDates('incidents in 2018', { dateTo: 'yesterday' });
+
+      for (const replaced of [response, overInvalid]) {
+        expect(interpretationOf(replaced).warnings).toEqual([]);
+        expect(dateRanges(replaced)).toEqual([
+          expect.objectContaining({
+            source: 'QUERY_TEXT',
+            dateFrom: '2018-01-01',
+            dateTo: '2018-12-31',
+          }),
+        ]);
+        expect(resultIds(replaced)).toEqual([10, 12]);
+      }
+    });
+
+    it('reports each invalid date and applies any valid bound', async () => {
+      embedAs([1, 0]);
+
+      const invalid = await searchDates('', { dateFrom: '2021-02-30', dateTo: '2023/12/31' });
+      const halfValid = await searchDates('', { dateFrom: '2023-01-01', dateTo: '2024-5-10' });
+
+      expect(embedded).toEqual([]);
+      expect(interpretationOf(invalid).warnings).toEqual([
+        { code: 'INVALID_DATE', text: '2021-02-30' },
+        { code: 'INVALID_DATE', text: '2023/12/31' },
+      ]);
+      expect(interpretationOf(invalid).constraints).toEqual([]);
+      expect(invalid.body.data.semanticSearch).toMatchObject({ status: 'OK', results: [] });
+
+      expect(interpretationOf(halfValid).warnings).toEqual([
+        { code: 'INVALID_DATE', text: '2024-5-10' },
+      ]);
+      expect(resultIds(halfValid)).toEqual([15, 13, 11]);
+    });
+
+    it('combines a date range with exclusions and does not count it as an entity filter', async () => {
+      embedAs([1, 0]);
+
+      const excluded = await searchDates('', { excludeNames: ['tesla'], dateFrom: '2023-01-01' });
+
+      // 11 is in range but Tesla's.
+      expect(resultIds(excluded)).toEqual([15, 13]);
+
+      const names = Array.from({ length: 20 }, (_, index) => `name-${index}`);
+      const capped = await searchDates('crashes', {
+        excludeNames: names,
+        dateFrom: '2023-01-01',
+        dateTo: '2024-12-31',
+      });
+
+      expect(capped.body.errors).toBeUndefined();
+      expect(dateRanges(capped)).toHaveLength(1);
+    });
+
+    it('never matches an incident without a usable date', async () => {
+      embedAs([1, 0]);
+
+      await seedCollection({
+        name: 'incidents',
+        docs: [
+          { ...incident(16, 'Undated incident', {}), date: undefined },
+          { ...incident(17, 'Badly dated incident', {}), date: '2024' },
+        ],
+        drop: false,
+      });
+
+      const response = await searchDates('incidents since 1900');
+
+      expect(resultIds(response)).toEqual([15, 13, 11, 14, 10, 12]);
+      expect(dateRanges(response)[0].incidentCount).toBe(6);
+    });
+
+    it('offers the earliest and latest incident dates as facets', async () => {
+      await seedCollection({
+        name: 'incidents',
+        docs: [{ ...incident(17, 'Badly dated incident', {}), date: '0' }],
+        drop: false,
+      });
+
+      const response = await makeRequest(url, {
+        query: `query { semanticSearchFacets { earliestDate latestDate } }`,
+      });
+
+      expect(response.body.errors).toBeUndefined();
+      expect(response.body.data.semanticSearchFacets).toEqual({
+        earliestDate: '2018-03-18',
+        latestDate: '2024-05-10',
+      });
+    });
+  });
+
   it('counts every incident above the minimum score before the limit', async () => {
     embedAs([1, 0]);
 
@@ -1097,6 +1388,248 @@ describe('semanticSearch exclusions', () => {
     expect(limited.body.data.semanticSearch).toMatchObject({
       status: 'QUOTA_EXHAUSTED',
       totalCount: 0,
+    });
+  });
+
+  describe('MIT risk domains', () => {
+    const DOMAINS = [
+      '1. Discrimination and Toxicity',
+      '2. Privacy & Security',
+      '3. Misinformation',
+      '4. Malicious Actors & Misuse',
+      '5. Human-Computer Interaction',
+      '6. Socioeconomic & Environmental Harms',
+      '7. AI system safety, failures, and limitations',
+    ];
+
+    const classification = (incidentId: number, domain: string, publish = true) => ({
+      namespace: 'MIT',
+      publish,
+      incidents: [incidentId],
+      attributes: [
+        { short_name: 'Intent', value_json: JSON.stringify('2 - Unintentional') },
+        { short_name: 'Risk Domain', value_json: JSON.stringify(domain) },
+      ],
+    });
+
+    const searchMit = (
+      query: string,
+      filters: { excludeEntities?: string[]; excludeNames?: string[]; mitRiskDomains?: string[] }
+    ) =>
+      makeRequest(url, {
+        query: `
+          query SemanticSearch($query: String!, $filters: SemanticSearchFilters) {
+            semanticSearch(query: $query, filters: $filters) {
+              status
+              totalCount
+              results { score incident { incident_id } }
+              interpretation {
+                semanticText
+                constraints {
+                  kind
+                  source
+                  matchedText
+                  mitRiskDomain
+                  incidentCount
+                  entities { entity_id }
+                }
+                warnings { code text }
+                suggestions { kind value label }
+              }
+            }
+          }
+        `,
+        variables: { query, filters },
+      });
+
+    const suggestionsOf = (response: any) => interpretationOf(response).suggestions;
+
+    const suggestedValues = (response: any) =>
+      suggestionsOf(response).map((suggestion: any) => suggestion.value);
+
+    beforeEach(async () => {
+      await seedCollection({
+        name: 'taxa',
+        docs: [
+          {
+            namespace: 'MIT',
+            field_list: [
+              { short_name: 'Intent', permitted_values: ['1 - Intentional', '2 - Unintentional'] },
+              { short_name: 'Risk Domain', permitted_values: DOMAINS },
+            ],
+          },
+          // Other taxonomies are never read.
+          {
+            namespace: 'CSETv1',
+            field_list: [{ short_name: 'Risk Domain', permitted_values: ['Not MIT'] }],
+          },
+        ],
+      });
+
+      // 13 has only an unpublished classification and 15 only a CSETv1 one, so neither matches.
+      await seedCollection({
+        name: 'classifications',
+        docs: [
+          classification(10, DOMAINS[6]),
+          classification(11, DOMAINS[6]),
+          classification(12, DOMAINS[6]),
+          classification(14, DOMAINS[1]),
+          classification(13, DOMAINS[2], false),
+          { ...classification(15, DOMAINS[2]), namespace: 'CSETv1' },
+        ],
+      });
+    });
+
+    it('keeps incidents with any of the domains and removes exclusions from them', async () => {
+      embedAs([1, 0]);
+
+      const response = await searchMit('crashes', {
+        mitRiskDomains: [DOMAINS[6], DOMAINS[2]],
+        excludeNames: ['tesla'],
+      });
+
+      expect(response.body.errors).toBeUndefined();
+      expect(embedded).toEqual(['crashes']);
+      expect(interpretationOf(response).constraints).toEqual([
+        expect.objectContaining({ kind: 'EXCLUDE_ENTITY', mitRiskDomain: null }),
+        {
+          kind: 'MIT_RISK_DOMAIN',
+          source: 'EXPLICIT_FILTER',
+          matchedText: DOMAINS[6],
+          mitRiskDomain: DOMAINS[6],
+          incidentCount: 3,
+          entities: [],
+        },
+        {
+          kind: 'MIT_RISK_DOMAIN',
+          source: 'EXPLICIT_FILTER',
+          matchedText: DOMAINS[2],
+          mitRiskDomain: DOMAINS[2],
+          incidentCount: 0,
+          entities: [],
+        },
+      ]);
+      expect(resultIds(response)).toEqual([12]);
+    });
+
+    it('lists the incidents of the domains newest first when nothing else is asked', async () => {
+      embedAs([1, 0]);
+
+      const response = await searchMit('', { mitRiskDomains: [DOMAINS[1], DOMAINS[6]] });
+
+      expect(response.body.errors).toBeUndefined();
+      expect(embedded).toEqual([]);
+      expect(interpretationOf(response).semanticText).toBe('');
+      expect(resultIds(response)).toEqual([11, 14, 10, 12]);
+      expect(response.body.data.semanticSearch.totalCount).toBe(4);
+    });
+
+    it('reports unknown values without applying them or counting them as entity filters', async () => {
+      embedAs([1, 0]);
+
+      const entityIds = Array.from({ length: 20 }, (_, index) => `entity-${index}`);
+
+      const response = await searchMit('crashes', {
+        excludeEntities: entityIds,
+        mitRiskDomains: ['Misinformation', 'Not MIT', DOMAINS[1]],
+      });
+
+      expect(response.body.errors).toBeUndefined();
+      expect(interpretationOf(response).warnings).toEqual([
+        ...entityIds.map((text) => ({ code: 'UNKNOWN_ENTITY', text })),
+        { code: 'UNKNOWN_MIT_DOMAIN', text: 'Misinformation' },
+        { code: 'UNKNOWN_MIT_DOMAIN', text: 'Not MIT' },
+      ]);
+      expect(interpretationOf(response).constraints).toEqual([
+        expect.objectContaining({ mitRiskDomain: DOMAINS[1], incidentCount: 1 }),
+      ]);
+      // 14 is the only incident in the domain, and it scores below the minimum.
+      expect(resultIds(response)).toEqual([]);
+    });
+
+    it('suggests the domains a query names without filtering on them', async () => {
+      embedAs([1, 0]);
+
+      const response = await searchMit('Privacy failures and misinformation', {});
+
+      expect(response.body.errors).toBeUndefined();
+      expect(embedded).toEqual(['Privacy failures and misinformation']);
+      expect(interpretationOf(response).constraints).toEqual([]);
+      expect(suggestionsOf(response)).toEqual([
+        { kind: 'MIT_RISK_DOMAIN', value: DOMAINS[1], label: 'Privacy & Security' },
+        {
+          kind: 'MIT_RISK_DOMAIN',
+          value: DOMAINS[6],
+          label: 'AI system safety, failures, and limitations',
+        },
+        { kind: 'MIT_RISK_DOMAIN', value: DOMAINS[2], label: 'Misinformation' },
+      ]);
+      expect(resultIds(response)).toEqual([10, 11, 12, 13, 15]);
+    });
+
+    it('suggests a domain only for a whole idea from its name, folding plurals', async () => {
+      embedAs([1, 0]);
+
+      const ideas = {
+        // Everyday words from the names suggest nothing on their own.
+        'an ai system harms actors in a human computer game': [],
+        'safety of an ai system': [],
+        'malicious actor deepfakes': [DOMAINS[3]],
+        'human-computer interactions with chatbots': [DOMAINS[4]],
+        'environmental harm from data centres': [DOMAINS[5]],
+        'ai systems safety': [DOMAINS[6]],
+      };
+
+      for (const [query, expected] of Object.entries(ideas)) {
+        const response = await searchMit(query, {});
+
+        expect({ query, suggested: suggestedValues(response) }).toEqual({
+          query,
+          suggested: expected,
+        });
+      }
+    });
+
+    it('caps suggestions at three, skipping filtered domains and excluded words', async () => {
+      embedAs([1, 0]);
+
+      const query = 'discrimination, privacy, misinformation and misuse';
+
+      expect(suggestedValues(await searchMit(query, {}))).toEqual(DOMAINS.slice(0, 3));
+      expect(suggestedValues(await searchMit(query, { mitRiskDomains: [DOMAINS[0]] }))).toEqual(
+        DOMAINS.slice(1, 4)
+      );
+      expect(suggestedValues(await searchMit('chatbots excluding misinformation', {}))).toEqual([]);
+    });
+
+    it('keeps incidents in any of the domains and in the date range, minus exclusions', async () => {
+      embedAs([1, 0]);
+
+      // The domains cover 10, 11, 12 and 14, and the dates 11, 13, 14 and 15. Of the 11 and 14
+      // they share, 11 is Tesla's.
+      const response = await searchMit('incidents since 2021 excluding tesla', {
+        mitRiskDomains: [DOMAINS[6], DOMAINS[1]],
+      });
+
+      expect(response.body.errors).toBeUndefined();
+      expect(embedded).toEqual([]);
+      expect(
+        interpretationOf(response).constraints.map((constraint: any) => constraint.kind)
+      ).toEqual(['MIT_RISK_DOMAIN', 'MIT_RISK_DOMAIN', 'EXCLUDE_ENTITY', 'DATE_RANGE']);
+      expect(resultIds(response)).toEqual([14]);
+      expect(response.body.data.semanticSearch.totalCount).toBe(1);
+    });
+
+    it('lists the seven domains in the facets, in their numbered order', async () => {
+      global.fetch = jest.fn();
+
+      const response = await makeRequest(url, {
+        query: `query SemanticSearchFacets { semanticSearchFacets { mitRiskDomains } }`,
+      });
+
+      expect(response.body.errors).toBeUndefined();
+      expect(response.body.data.semanticSearchFacets.mitRiskDomains).toEqual(DOMAINS);
+      expect(global.fetch).not.toHaveBeenCalled();
     });
   });
 
@@ -1310,6 +1843,9 @@ describe('semanticSearch exclusions', () => {
                   source
                   matchedText
                   roles
+                  mitRiskDomain
+                  dateFrom
+                  dateTo
                   incidentCount
                   entities { entity_id name matchedBy }
                 }
@@ -1335,6 +1871,10 @@ describe('semanticSearch exclusions', () => {
 
     beforeEach(async () => {
       embedAs([1, 0]);
+
+      // Without MIT domains, so words like "failures" suggest nothing, whatever ran before.
+      await seedCollection({ name: 'taxa', docs: [] });
+      await seedCollection({ name: 'classifications', docs: [] });
 
       await seedCollection({
         name: 'entities',
@@ -1523,13 +2063,119 @@ describe('semanticSearch exclusions', () => {
       expect(embedded).toEqual(['failures', 'failures', 'failures', 'failures']);
     });
 
+    it('keeps only incidents that satisfy every group, with exclusions applied last', async () => {
+      const clock = jest
+        .spyOn(semanticSearchClock, 'now')
+        .mockReturnValue(new Date('2024-07-15T12:00:00Z'));
+
+      try {
+        const MISINFORMATION = '3. Misinformation';
+        const PRIVACY = '2. Privacy & Security';
+
+        const classification = (incidentId: number, domain: string) => ({
+          namespace: 'MIT',
+          publish: true,
+          incidents: [incidentId],
+          attributes: [{ short_name: 'Risk Domain', value_json: JSON.stringify(domain) }],
+        });
+
+        await seedCollection({
+          name: 'taxa',
+          docs: [
+            {
+              namespace: 'MIT',
+              field_list: [
+                { short_name: 'Risk Domain', permitted_values: [PRIVACY, MISINFORMATION] },
+              ],
+            },
+          ],
+        });
+
+        // Each of 45 to 49 fails exactly one requirement and passes the rest. 40 and 41 pass all.
+        await seedCollection({
+          name: 'incidents',
+          docs: [
+            {
+              ...incident(45, 'Wrong MIT domain', { deployer: ['google'], harmed: ['students'] }),
+              date: '2023-03-01',
+            },
+            {
+              ...incident(46, 'Too old', { deployer: ['google'], harmed: ['students'] }),
+              date: '2019-03-01',
+            },
+            {
+              ...incident(47, 'Excluded organisation', {
+                deployer: ['google'],
+                developer: ['openai'],
+                harmed: ['students'],
+              }),
+              date: '2023-03-01',
+            },
+            {
+              ...incident(48, 'Not Google', { deployer: ['uber'], harmed: ['students'] }),
+              date: '2023-03-01',
+            },
+            {
+              ...incident(49, 'Other harmed party', {
+                deployer: ['google'],
+                harmed: ['low-income-tenants'],
+              }),
+              date: '2023-03-01',
+            },
+          ],
+          drop: false,
+        });
+        await seedCollection({
+          name: 'classifications',
+          docs: [
+            classification(40, MISINFORMATION),
+            classification(41, MISINFORMATION),
+            classification(42, MISINFORMATION),
+            classification(45, PRIVACY),
+            classification(46, MISINFORMATION),
+            classification(47, MISINFORMATION),
+            classification(48, MISINFORMATION),
+            classification(49, MISINFORMATION),
+          ],
+        });
+        await seedCollection({
+          name: 'incident_embeddings',
+          docs: [45, 46, 47, 48, 49].map((id) => vectors(id, [0.5, 0.86])),
+          drop: false,
+        });
+
+        const response = await searchFor(
+          'chatbot failures by google affecting students since 2022 excluding openai',
+          { filters: { mitRiskDomains: [MISINFORMATION] } }
+        );
+
+        expect(response.body.errors).toBeUndefined();
+        expect(embedded).toEqual(['chatbot failures']);
+        expect(
+          interpretationOf(response).constraints.map((constraint: any) => [
+            constraint.kind,
+            constraint.incidentCount > 0,
+          ])
+        ).toEqual([
+          ['MIT_RISK_DOMAIN', true],
+          ['INCLUDE_ENTITY', true],
+          ['HARMED_PARTY', true],
+          ['EXCLUDE_ENTITY', true],
+          ['DATE_RANGE', true],
+        ]);
+        expect(resultIds(response)).toEqual([40, 41]);
+        expect(response.body.data.semanticSearch.totalCount).toBe(2);
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
     it('leaves an unknown inclusion in the text exactly as written, without a warning', async () => {
       const unknown = await searchFor('failures by acme robotics');
       // Students never develop anything, and the "by" is not read again on its own.
       const wrongRole = await searchFor('chatbots developed by students');
-      const year = await searchFor('robot failures from 2023');
 
-      for (const response of [unknown, wrongRole, year]) {
+      for (const response of [unknown, wrongRole]) {
         expect(interpretationOf(response).constraints).toEqual([]);
         expect(interpretationOf(response).warnings).toEqual([]);
       }
@@ -1537,11 +2183,16 @@ describe('semanticSearch exclusions', () => {
       // A name left alone after a linking word is not offered as a suggestion either.
       expect(interpretationOf(wrongRole).suggestions).toEqual([]);
 
-      expect(embedded).toEqual([
-        'failures by acme robotics',
-        'chatbots developed by students',
-        'robot failures from 2023',
-      ]);
+      expect(embedded).toEqual(['failures by acme robotics', 'chatbots developed by students']);
+    });
+
+    it('reads "from" before a year as a date, never as an inclusion', async () => {
+      // An entity is named "2023" and is responsible for incident 44, so an inclusion would find it.
+      const response = await searchFor('robot failures from 2023');
+
+      expect(constraintsOf(response).map(({ kind }: any) => kind)).toEqual(['DATE_RANGE']);
+      expect(embedded).toEqual(['robot failures']);
+      expect(resultIds(response)).toEqual([11, 13, 15, 41]);
     });
 
     it('suggests up to three plain mentions of responsible entities, until one is applied', async () => {

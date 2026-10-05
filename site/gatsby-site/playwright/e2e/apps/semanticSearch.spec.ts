@@ -9,13 +9,16 @@ const url = '/apps/semantic-search/';
 // The API returns an interpretation with every status. A query without constraints has nothing in it.
 const unconstrained = { semanticText: '', constraints: [], warnings: [] };
 
-// Fills in the fields a mock leaves out because its test isn't about them. Apollo drops a reply
-// that lacks a field the page asked for.
+// Fills in the fields the page asks for that a mocked interpretation leaves out, since Apollo
+// returns no data at all for a reply that is missing a requested field.
 const withDefaults = (interpretation: any) => ({
   suggestions: [],
   ...interpretation,
   constraints: interpretation.constraints.map((constraint: any) => ({
     roles: null,
+    dateFrom: null,
+    dateTo: null,
+    mitRiskDomain: null,
     ...constraint,
   })),
 });
@@ -563,13 +566,16 @@ test.describe('Semantic Search', () => {
     const facets = {
       data: {
         semanticSearchFacets: {
+          harmedEntities: [],
           responsibleEntities: [
             { entity_id: 'tesla', name: 'Tesla' },
             { entity_id: 'tesla-autopilot', name: 'Tesla Autopilot' },
             { entity_id: 'uber', name: 'Uber' },
             { entity_id: 'waymo', name: 'Waymo' },
           ],
-          harmedEntities: [],
+          mitRiskDomains: [],
+          earliestDate: '1983-01-01',
+          latestDate: '2026-09-30',
         },
       },
     };
@@ -792,6 +798,292 @@ test.describe('Semantic Search', () => {
     expect(workbook.Results[1].slice(0, 2)).toEqual(['', '7']);
   });
 
+  test('filters by MIT risk domains from the control and from suggestions', async ({
+    page,
+    login,
+  }) => {
+    await login({ customData: { roles: ['subscriber'] } });
+
+    const misinformation = '3. Misinformation';
+    const privacy = '2. Privacy & Security';
+
+    const facets = {
+      data: {
+        semanticSearchFacets: {
+          harmedEntities: [],
+          responsibleEntities: [],
+          mitRiskDomains: [
+            '1. Discrimination and Toxicity',
+            privacy,
+            misinformation,
+            '4. Malicious Actors & Misuse',
+            '5. Human-Computer Interaction',
+            '6. Socioeconomic & Environmental Harms',
+            '7. AI system safety, failures, and limitations',
+          ],
+          earliestDate: '1983-09-26',
+          latestDate: '2026-09-30',
+        },
+      },
+    };
+
+    const mit = (domain: string, incidentCount: number) => ({
+      kind: 'MIT_RISK_DOMAIN',
+      source: 'EXPLICIT_FILTER',
+      matchedText: domain,
+      mitRiskDomain: domain,
+      incidentCount,
+      entities: [],
+    });
+
+    const readAs = (constraints: unknown[], suggestions: unknown[] = []) => ({
+      semanticText: 'election misinformation',
+      constraints,
+      warnings: [],
+      suggestions,
+    });
+
+    // The words only suggest the domain. Each later reply applies the domains sent back.
+    const replies = [
+      readAs([], [{ kind: 'MIT_RISK_DOMAIN', value: misinformation, label: 'Misinformation' }]),
+      readAs([mit(misinformation, 196)]),
+      readAs([mit(misinformation, 196), mit(privacy, 112)]),
+      readAs([mit(privacy, 112)]),
+      readAs([]),
+    ];
+    const requests: unknown[] = [];
+
+    await page.route('**/graphql', async (route) => {
+      const request = route.request().postDataJSON();
+
+      if (request.operationName === 'SemanticSearchFacets') {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(facets),
+        });
+        return;
+      }
+
+      if (request.operationName !== 'SemanticSearch') {
+        await route.continue();
+        return;
+      }
+
+      requests.push(request.variables);
+
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(response('OK', results.slice(0, 2), replies[requests.length - 1])),
+      });
+    });
+
+    await page.goto(url);
+
+    const input = page.locator('[data-cy="semantic-search-input"]');
+    const suggestion = page.locator('[data-cy="semantic-search-suggestion"]');
+    const chip = page.locator('[data-cy="semantic-search-mit-domain"]');
+    const option = (domain: string) =>
+      page.locator(`[data-cy="semantic-search-mit-domain-option"][value="${domain}"]`);
+
+    await expect(page.locator('[data-cy="semantic-search-mit-domain-option"]')).toHaveCount(7);
+
+    await input.fill('election misinformation');
+    await page.locator('[data-cy="semantic-search-submit"]').click();
+
+    await expect(suggestion).toHaveText('Filter to MIT: Misinformation?');
+    await expect(chip).toHaveCount(0);
+    await expect(input).toHaveValue('election misinformation');
+
+    await suggestion.click();
+
+    await expect(chip).toHaveCount(1);
+    await expect(chip).toContainText('MIT: Misinformation');
+    await expect(chip).toContainText('196 incidents');
+    await expect(suggestion).toHaveCount(0);
+    await expect(option(misinformation)).toBeChecked();
+
+    await option(privacy).check();
+
+    await expect(chip).toHaveCount(2);
+    await expect(chip.nth(1)).toContainText('MIT: Privacy & Security');
+
+    // Removing a chip unticks its domain in the control.
+    await chip
+      .filter({ hasText: 'Misinformation' })
+      .locator('[data-cy="semantic-search-remove-constraint"]')
+      .click();
+
+    await expect(chip).toHaveCount(1);
+    await expect(option(misinformation)).not.toBeChecked();
+    await expect(option(privacy)).toBeChecked();
+
+    await option(privacy).uncheck();
+
+    await expect(chip).toHaveCount(0);
+
+    const query = 'election misinformation';
+    const noEntities = { excludeEntities: [], excludeNames: [] };
+
+    await expect
+      .poll(() => requests)
+      .toEqual([
+        { query, filters: noEntities },
+        { query, filters: { ...noEntities, mitRiskDomains: [misinformation] } },
+        { query, filters: { ...noEntities, mitRiskDomains: [misinformation, privacy] } },
+        { query, filters: { ...noEntities, mitRiskDomains: [privacy] } },
+        { query, filters: noEntities },
+      ]);
+  });
+
+  test('limits a search to a period typed in the query or set in the date control', async ({
+    page,
+    login,
+  }) => {
+    await login({ customData: { roles: ['subscriber'] } });
+
+    const facets = {
+      data: {
+        semanticSearchFacets: {
+          harmedEntities: [],
+          responsibleEntities: [],
+          mitRiskDomains: [],
+          earliestDate: '1983-09-26',
+          latestDate: '2026-09-30',
+        },
+      },
+    };
+
+    const dateRange = (
+      source: string,
+      matchedText: string | null,
+      dateFrom: string | null,
+      dateTo: string | null,
+      incidentCount: number
+    ) => ({
+      kind: 'DATE_RANGE',
+      source,
+      matchedText,
+      dateFrom,
+      dateTo,
+      incidentCount,
+      entities: [],
+    });
+
+    const readAs = (constraints: unknown[]) => ({
+      semanticText: 'deepfakes',
+      constraints,
+      warnings: [],
+    });
+
+    // The reply to each search in turn. A date typed in the query replaces the range sent with it.
+    const replies = [
+      readAs([dateRange('QUERY_TEXT', 'since 2020', '2020-01-01', null, 120)]),
+      readAs([dateRange('EXPLICIT_FILTER', null, '2020-01-01', '2022-12-31', 70)]),
+      readAs([dateRange('QUERY_TEXT', 'in 2019', '2019-01-01', '2019-12-31', 25)]),
+      readAs([]),
+    ];
+    const requests: unknown[] = [];
+
+    await page.route('**/graphql', async (route) => {
+      const request = route.request().postDataJSON();
+
+      if (request.operationName === 'SemanticSearchFacets') {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(facets),
+        });
+        return;
+      }
+
+      if (request.operationName !== 'SemanticSearch') {
+        await route.continue();
+        return;
+      }
+
+      requests.push(request.variables);
+
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(response('OK', results.slice(0, 2), replies[requests.length - 1])),
+      });
+    });
+
+    await page.goto(url);
+
+    const input = page.locator('[data-cy="semantic-search-input"]');
+    const submit = page.locator('[data-cy="semantic-search-submit"]');
+    const chip = page.locator('[data-cy="semantic-search-date-range"]');
+    const dateFrom = page.locator('[data-cy="semantic-search-date-from"]');
+    const dateTo = page.locator('[data-cy="semantic-search-date-to"]');
+    const apply = page.locator('[data-cy="semantic-search-apply-dates"]');
+
+    // The control offers only the days incidents span.
+    await expect(dateFrom).toHaveAttribute('min', '1983-09-26');
+    await expect(dateTo).toHaveAttribute('max', '2026-09-30');
+
+    await input.fill('deepfakes since 2020');
+    await submit.click();
+
+    // A typed date becomes a chip and fills the control, and leaves the box.
+    await expect(chip).toHaveCount(1);
+    await expect(chip).toContainText('Since 2020');
+    await expect(chip).toContainText('120 incidents');
+    await expect(input).toHaveValue('deepfakes');
+    await expect(dateFrom).toHaveValue('2020-01-01');
+    await expect(dateTo).toHaveValue('');
+    await expect(apply).toBeDisabled();
+
+    await dateTo.fill('2022-12-31');
+    await apply.click();
+
+    await expect(chip).toContainText('2020–2022');
+    await expect(chip).toContainText('70 incidents');
+
+    await input.fill('deepfakes in 2019');
+    await submit.click();
+
+    await expect(chip).toHaveCount(1);
+    await expect(chip).toContainText('In 2019');
+    await expect(dateFrom).toHaveValue('2019-01-01');
+    await expect(dateTo).toHaveValue('2019-12-31');
+
+    await chip.locator('[data-cy="semantic-search-remove-constraint"]').click();
+
+    await expect(chip).toHaveCount(0);
+    await expect(dateFrom).toHaveValue('');
+    await expect(dateTo).toHaveValue('');
+
+    // The range goes back as its bounds, search after search, and not at all once removed.
+    await expect
+      .poll(() => requests)
+      .toEqual([
+        { query: 'deepfakes since 2020', filters: { excludeEntities: [], excludeNames: [] } },
+        {
+          query: 'deepfakes',
+          filters: {
+            excludeEntities: [],
+            excludeNames: [],
+            dateFrom: '2020-01-01',
+            dateTo: '2022-12-31',
+          },
+        },
+        {
+          query: 'deepfakes in 2019',
+          filters: {
+            excludeEntities: [],
+            excludeNames: [],
+            dateFrom: '2020-01-01',
+            dateTo: '2022-12-31',
+          },
+        },
+        { query: 'deepfakes', filters: { excludeEntities: [], excludeNames: [] } },
+      ]);
+  });
+
   test('holds inclusions and affected parties as chips and sends them back with their roles', async ({
     page,
     login,
@@ -1000,6 +1292,9 @@ test.describe('Semantic Search', () => {
             { entity_id: 'students', name: 'Students' },
             { entity_id: 'tesla-drivers', name: 'Tesla drivers' },
           ],
+          mitRiskDomains: [],
+          earliestDate: '1983-01-01',
+          latestDate: '2026-09-30',
         },
       },
     };
