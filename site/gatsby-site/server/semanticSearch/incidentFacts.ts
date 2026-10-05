@@ -182,8 +182,22 @@ export const loadIncidentFacts = async (client: MongoClient): Promise<IncidentFa
       occursIn(id, roles)
     );
 
-    const startsAName = () =>
-      candidates.some((id) => words.every((word, index) => wordsById.get(id)![index] === word));
+    // The first words of a name stand for it only when every name they start continues the same
+    // way, as "clearview" does for "Clearview AI ...". Words that start unrelated names, like
+    // "deepfake" ("Deepfake creators", "Deepfake technology") or "ai", are a topic, not a name.
+    const startsAName = () => {
+      const started = candidates
+        .map((id) => wordsById.get(id)!)
+        .filter((name) => words.every((word, index) => name[index] === word));
+
+      if (started.length === 0) return false;
+
+      const stem = started.reduce((shortest, name) =>
+        name.length < shortest.length ? name : shortest
+      );
+
+      return started.every((name) => stem.every((word, index) => name[index] === word));
+    };
 
     if (named.size === 0 && !(allowNameStart && startsAName())) return [];
 
@@ -293,6 +307,8 @@ export const loadIncidentFacts = async (client: MongoClient): Promise<IncidentFa
     dateSpan,
     incidentIds,
     incidentsWith,
+    incidentCount: (entityIds: readonly string[], roles: readonly EntityRole[]) =>
+      incidentsWith(entityIds, roles).size,
     nameOf,
     dateOf,
     resolve,

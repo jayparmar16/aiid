@@ -28,8 +28,9 @@ export interface Vocabulary {
   /**
    * The entities occurring in `roles` that a name written as `words` covers, or an empty list when
    * the words are not a known name or none of the covered entities occurs in those roles. A known
-   * name is an entity's whole name or, with `allowNameStart`, the first words of one ("clearview"
-   * for "Clearview AI"). The covered entities are the name's family and the entities linked to the
+   * name is an entity's whole name or, with `allowNameStart`, the first words of names that all
+   * continue the same way ("clearview" for "Clearview AI ..."), but not of unrelated ones
+   * ("deepfake" starts "Deepfake creators" and "Deepfake technology"). The covered entities are the name's family and the entities linked to the
    * named entity, ordered NAME, FAMILY, LINK.
    */
   resolve: (
@@ -37,6 +38,8 @@ export interface Vocabulary {
     roles: readonly EntityRole[],
     options?: { allowNameStart?: boolean }
   ) => ResolvedEntity[];
+  /** How many incidents any of the entities occurs in, in any of the roles. */
+  incidentCount: (entityIds: readonly string[], roles: readonly EntityRole[]) => number;
   /** The most words in any entity name, which bounds the longest-match search. */
   longestNameWords: number;
   /** The MIT risk domains, exactly as stored ("3. Misinformation"). */
@@ -171,6 +174,8 @@ interface InclusionPhrase {
   words: string[];
   kind: 'INCLUDE_ENTITY' | 'HARMED_PARTY';
   roles: readonly EntityRole[];
+  /** Reads the name in whichever role it occurs in more often, responsible or harmed. */
+  eitherRole?: boolean;
 }
 
 const inclusions = (
@@ -182,13 +187,16 @@ const inclusions = (
 /**
  * Linking words that keep only the incidents involving what follows them. The role-specific
  * phrases come before the bare "by" they end with, so "developed by" restricts the match to
- * developers.
+ * developers. "Against" points either way: "lawsuits against openai" is about the company
+ * responsible, "bias against women" about the people harmed, so the data decides which role it
+ * means for each name.
  */
-const INCLUSION_PHRASES = [
+const INCLUSION_PHRASES: InclusionPhrase[] = [
   ...inclusions(['developed by', 'made by', 'built by'], 'INCLUDE_ENTITY', ['developer']),
   ...inclusions(['deployed by', 'used by', 'operated by'], 'INCLUDE_ENTITY', ['deployer']),
   ...inclusions(['by', 'from', 'involving', 'involves'], 'INCLUDE_ENTITY', RESPONSIBLE_ROLES),
-  ...inclusions(['affecting', 'harming', 'targeting', 'against'], 'HARMED_PARTY', HARMED_ROLES),
+  ...inclusions(['affecting', 'harming', 'targeting'], 'HARMED_PARTY', HARMED_ROLES),
+  { words: ['against'], kind: 'HARMED_PARTY', roles: HARMED_ROLES, eitherRole: true },
 ];
 
 const YEAR = /^\d{4}$/;
@@ -225,7 +233,7 @@ const readName = (
  * The entities a name covers when it is written after a strong exclusion phrase such as
  * "excluding", or an empty list when the whole text is not one known name. A name read from one
  * query is read again by this to apply it to the next, so it covers the same entities, even when
- * it is only the first words of several names ("gpt").
+ * it is only the first words of several names that share a stem ("clearview").
  */
 export const readExcludedName = (name: string, vocabulary: Vocabulary): ResolvedEntity[] => {
   const words = toWords(name);
@@ -319,13 +327,38 @@ const yearsBefore = (now: Date, years: number) => {
  * 1900 to 2100, COUNT for a number of years, or -YEAR for a year joined to the one before it by a
  * dash. At one position the first phrase that matches wins, so longer phrases come first.
  */
+const RECENT_PREFIXES = [['in|during|over|within', 'the'], ['the'], ['in|during|over|within'], []];
+
 const DATE_PHRASES: { slots: string[]; bounds: (numbers: number[], now: Date) => DateBounds }[] = [
-  ...[['in|during|over|within', 'the'], ['the'], ['in|during|over|within'], []].map((prefix) => ({
+  ...RECENT_PREFIXES.map((prefix) => ({
     slots: [...prefix, 'past|last', 'COUNT', 'years|year'],
     bounds: ([count]: number[], now: Date) => ({
       dateFrom: yearsBefore(now, count),
       dateTo: isoDay(now),
     }),
+  })),
+  // "Since last year" runs on to today, unlike "last year", which is that calendar year alone.
+  {
+    slots: ['since', 'last', 'year'],
+    bounds: (_: number[], now: Date) => ({
+      dateFrom: startOf(now.getUTCFullYear() - 1),
+      dateTo: null,
+    }),
+  },
+  {
+    slots: ['since', 'this', 'year'],
+    bounds: (_: number[], now: Date) => ({ dateFrom: startOf(now.getUTCFullYear()), dateTo: null }),
+  },
+  // "The past year" and "in the last year" mean the twelve months to today, as "the past 1 year"
+  // would. "Last year" and "in last year" still name the previous calendar year.
+  ...[
+    ['in|during|over|within', 'the', 'past|last'],
+    ['the', 'past|last'],
+    ['in|during|over|within', 'past'],
+    ['past'],
+  ].map((prefix) => ({
+    slots: [...prefix, 'year'],
+    bounds: (_: number[], now: Date) => ({ dateFrom: yearsBefore(now, 1), dateTo: isoDay(now) }),
   })),
   { slots: ['between', 'YEAR', 'and', 'YEAR'], bounds: wholeYears },
   { slots: ['from', 'YEAR', 'to|until|through', 'YEAR'], bounds: wholeYears },
@@ -605,12 +638,31 @@ export const parseQuery = (query: string, vocabulary: Vocabulary, now: Date): In
     });
 
   /**
+   * The reading of the names after "against" whose entities occur in more incidents: involving
+   * them as responsible parties, or affecting them as harmed ones. A tie keeps the harmed reading.
+   */
+  const likelierReading = (afterPhrase: number): InclusionPhrase => {
+    const covered = (roles: readonly EntityRole[]) =>
+      vocabulary.incidentCount(
+        namesAt(afterPhrase, false, roles).flatMap((name) =>
+          name.entities.map((entity) => entity.entityId)
+        ),
+        roles
+      );
+
+    return covered(RESPONSIBLE_ROLES) > covered(HARMED_ROLES)
+      ? { words: ['against'], kind: 'INCLUDE_ENTITY', roles: RESPONSIBLE_ROLES }
+      : { words: ['against'], kind: 'HARMED_PARTY', roles: HARMED_ROLES };
+  };
+
+  /**
    * Reads the names after an inclusion phrase as constraints and returns where reading continues.
    * Each name must be an entity's whole name and occur in the phrase's roles. Anything else is left
    * in the text exactly as written, linking word included, so nothing typed is lost.
    */
-  const include = (index: number, inclusion: InclusionPhrase) => {
-    const afterPhrase = index + inclusion.words.length;
+  const include = (index: number, phrase: InclusionPhrase) => {
+    const afterPhrase = index + phrase.words.length;
+    const inclusion = phrase.eitherRole ? likelierReading(afterPhrase) : phrase;
     const names = namesAt(afterPhrase, false, inclusion.roles);
 
     afterLinkingWord.add(skipArticles(afterPhrase));

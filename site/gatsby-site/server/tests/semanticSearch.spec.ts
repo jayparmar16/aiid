@@ -759,19 +759,20 @@ describe('semanticSearch exclusions', () => {
   it('reads each constraint again from its matched text, as the page sends them back', async () => {
     embedAs([1, 0]);
 
-    // Several names start with "gpt" and none is just "GPT", so no one entity stands for them all.
+    // Two names start with "gpt" and none is just "GPT", so no one entity stands for them both.
+    // They share the stem "GPT-4", which is what lets the first word stand for them.
     await seedCollection({
       name: 'entities',
       docs: [
-        { entity_id: 'gpt-3', name: 'GPT-3' },
         { entity_id: 'gpt-4', name: 'GPT-4' },
+        { entity_id: 'gpt-4-turbo', name: 'GPT-4 Turbo' },
       ],
       drop: false,
     });
     await seedCollection({
       name: 'incidents',
       docs: [
-        incident(30, 'GPT-3 invents court cases', { implicated: ['gpt-3'] }),
+        incident(30, 'GPT-4 Turbo invents court cases', { implicated: ['gpt-4-turbo'] }),
         incident(31, 'GPT-4 reveals its instructions', { developer: ['gpt-4'] }),
       ],
       drop: false,
@@ -788,7 +789,7 @@ describe('semanticSearch exclusions', () => {
     expect(excludedIds(typed)).toEqual([
       ['tesla', 'tesla-autopilot', 'tesla-full-self-driving-(fsd)'],
       ['clearview-ai'],
-      ['gpt-3', 'gpt-4'],
+      ['gpt-4', 'gpt-4-turbo'],
     ]);
 
     const held = await search(semanticText, {
@@ -1630,6 +1631,136 @@ describe('semanticSearch exclusions', () => {
       expect(response.body.errors).toBeUndefined();
       expect(response.body.data.semanticSearchFacets.mitRiskDomains).toEqual(DOMAINS);
       expect(global.fetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('query reading fixes', () => {
+    // Far from the real date, so a relative phrase that ignored the clock would fail.
+    const now = new Date('2024-07-15T12:00:00Z');
+
+    const searchFor = (query: string, filters?: Record<string, unknown>) =>
+      makeRequest(url, {
+        query: `
+          query SemanticSearch($query: String!, $filters: SemanticSearchFilters) {
+            semanticSearch(query: $query, filters: $filters) {
+              results { incident { incident_id } }
+              interpretation {
+                semanticText
+                constraints { kind matchedText roles dateFrom dateTo }
+                warnings { code text }
+              }
+            }
+          }
+        `,
+        variables: { query, filters },
+      });
+
+    beforeEach(async () => {
+      embedAs([1, 0]);
+      jest.spyOn(semanticSearchClock, 'now').mockReturnValue(now);
+
+      // Students are harmed in two incidents and responsible in one (15).
+      // The two deepfake names start with the same word but share no longer name.
+      await seedCollection({
+        name: 'entities',
+        docs: [
+          { entity_id: 'deepfake-creators', name: 'Deepfake creators' },
+          { entity_id: 'deepfake-technology', name: 'Deepfake technology' },
+        ],
+        drop: false,
+      });
+      await seedCollection({
+        name: 'incidents',
+        docs: [
+          incident(40, 'Exam software flags students', {
+            deployer: ['uber'],
+            harmed: ['students'],
+          }),
+          incident(41, 'Chatbot misleads students', { deployer: ['waymo'], harmed: ['students'] }),
+          incident(42, 'Deepfake creators impersonate a CEO', { deployer: ['deepfake-creators'] }),
+          incident(43, 'Deepfake technology fools a bank', { developer: ['deepfake-technology'] }),
+        ],
+        drop: false,
+      });
+      await seedCollection({
+        name: 'incident_embeddings',
+        docs: [40, 41, 42, 43].map((id) => vectors(id, [0.7, 0.71])),
+        drop: false,
+      });
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it.each([
+      ['incidents since last year', '', '2023-01-01', null],
+      ['deepfakes since this year', 'deepfakes', '2024-01-01', null],
+      ['deepfakes in the past year', 'deepfakes', '2023-07-15', '2024-07-15'],
+      ['deepfakes over the last year', 'deepfakes', '2023-07-15', '2024-07-15'],
+      ['deepfakes in the last year', 'deepfakes', '2023-07-15', '2024-07-15'],
+      ['deepfakes last year', 'deepfakes', '2023-01-01', '2023-12-31'],
+    ])('reads %p as its whole date phrase', async (query, semanticText, dateFrom, dateTo) => {
+      const response = await searchFor(query);
+
+      expect(interpretationOf(response).semanticText).toBe(semanticText);
+      expect(interpretationOf(response).constraints).toEqual([
+        expect.objectContaining({ kind: 'DATE_RANGE', dateFrom, dateTo }),
+      ]);
+    });
+
+    it('reads "against" a company as the party responsible', async () => {
+      // Tesla is responsible in 10 and 11, and only Tesla drivers are harmed, in 13.
+      const response = await searchFor('lawsuits against tesla');
+
+      expect(interpretationOf(response).semanticText).toBe('lawsuits');
+      expect(interpretationOf(response).constraints).toEqual([
+        expect.objectContaining({
+          kind: 'INCLUDE_ENTITY',
+          matchedText: 'tesla',
+          roles: ['DEPLOYER', 'DEVELOPER', 'IMPLICATED'],
+        }),
+      ]);
+      expect(resultIds(response).sort()).toEqual([10, 11]);
+    });
+
+    it('reads "against" a group that is mostly harmed as the people affected', async () => {
+      const response = await searchFor('bias against students');
+
+      expect(interpretationOf(response).constraints).toEqual([
+        expect.objectContaining({
+          kind: 'HARMED_PARTY',
+          matchedText: 'students',
+          roles: ['HARMED'],
+        }),
+      ]);
+      expect(resultIds(response).sort()).toEqual([40, 41]);
+    });
+
+    it('leaves "against" an unknown name in the text', async () => {
+      const response = await searchFor('fraud against robocall operators');
+
+      expect(interpretationOf(response)).toMatchObject({
+        semanticText: 'fraud against robocall operators',
+        constraints: [],
+        warnings: [],
+      });
+    });
+
+    it('does not let the first word of unrelated names stand for them', async () => {
+      const typed = await searchFor('scams excluding deepfake videos');
+      const held = await searchFor('scams', { excludeNames: ['deepfake'] });
+
+      expect(interpretationOf(typed)).toMatchObject({
+        semanticText: 'scams',
+        constraints: [],
+        warnings: [{ code: 'UNRECOGNISED_EXCLUSION', text: 'deepfake videos' }],
+      });
+      expect(interpretationOf(held)).toMatchObject({
+        constraints: [],
+        warnings: [{ code: 'UNRECOGNISED_EXCLUSION', text: 'deepfake' }],
+      });
+      expect(resultIds(typed)).toEqual(expect.arrayContaining([42, 43]));
     });
   });
 
