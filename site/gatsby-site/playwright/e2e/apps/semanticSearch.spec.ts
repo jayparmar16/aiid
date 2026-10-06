@@ -100,6 +100,65 @@ test.describe('Semantic Search', () => {
     await expect(page.locator('[data-cy="api-login-required"]')).toBeVisible();
     await expect(page.locator('[data-cy="semantic-search-form"]')).toHaveCount(0);
     await expect(page.locator('[data-cy="semantic-search-examples"]')).toHaveCount(0);
+    await expect(page.locator('[data-cy="semantic-search-tips-tab"]')).toHaveCount(0);
+  });
+
+  test('opens a tips panel whose examples fill the search box without searching', async ({
+    page,
+    login,
+  }) => {
+    await login({ customData: { roles: ['subscriber'] } });
+
+    let searches = 0;
+
+    await page.route('**/graphql', async (route) => {
+      if (route.request().postDataJSON().operationName === 'SemanticSearch') searches++;
+      await route.continue();
+    });
+
+    await page.goto(url);
+
+    const tab = page.locator('[data-cy="semantic-search-tips-tab"]');
+    const panel = page.locator('[data-cy="semantic-search-tips"]');
+    const input = page.locator('[data-cy="semantic-search-input"]');
+
+    // Closed until asked for.
+    await expect(tab).toBeVisible();
+    await expect(panel).toBeHidden();
+
+    await tab.click();
+    await expect(panel).toBeVisible();
+    await expect(tab).toHaveAttribute('aria-expanded', 'true');
+    await expect(panel.locator('h3')).toHaveText([
+      'Leave out',
+      'Only these',
+      'Who was harmed',
+      'When',
+    ]);
+    await expect(panel).toContainText('Names must be spelled exactly');
+
+    await panel.getByRole('button', { name: 'crashes excluding tesla' }).click();
+    await expect(panel).toBeHidden();
+    await expect(input).toHaveValue('crashes excluding tesla');
+    await expect(input).toBeFocused();
+
+    await tab.click();
+    await expect(panel).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(panel).toBeHidden();
+    await expect(tab).toBeFocused();
+
+    await tab.click();
+    await page.locator('[data-cy="semantic-search-tips-close"]').click();
+    await expect(panel).toBeHidden();
+
+    await tab.click();
+    await page
+      .locator('[data-cy="semantic-search-tips-backdrop"]')
+      .click({ position: { x: 10, y: 10 } });
+    await expect(panel).toBeHidden();
+
+    expect(searches).toBe(0);
   });
 
   test('runs each example immediately and supports results, sorting, pagination, and export errors', async ({

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { useLazyQuery } from '@apollo/client';
 import { Trans, useTranslation } from 'react-i18next';
 import { Button, Spinner, TextInput } from 'flowbite-react';
@@ -10,6 +10,7 @@ import SearchInterpretation from '../../components/semanticSearch/SearchInterpre
 import OrganisationFilter from '../../components/semanticSearch/OrganisationFilter';
 import AffectedPartyFilter from '../../components/semanticSearch/AffectedPartyFilter';
 import DateRangeFilter from '../../components/semanticSearch/DateRangeFilter';
+import SearchWordsPanel from '../../components/semanticSearch/SearchWordsPanel';
 import { kindOf } from '../../components/semanticSearch/EntityFilter';
 import { SEMANTIC_SEARCH } from '../../graphql/semanticSearch';
 
@@ -142,6 +143,8 @@ export default function SemanticSearchPage() {
 
   const [input, setInput] = useState('');
 
+  const inputRef = useRef(null);
+
   const [submitted, setSubmitted] = useState('');
 
   // The constraints of the latest search, shown as removable chips and sent with the next one.
@@ -204,6 +207,12 @@ export default function SemanticSearchPage() {
     }
   };
 
+  // An example from the tips panel goes into the box to edit, and is searched only when sent.
+  const fillWithExample = (example) => {
+    setInput(example);
+    inputRef.current?.focus();
+  };
+
   // A chip picked from a control has no constraint until its search returns.
   const constraints = chips.flatMap((chip) => (chip.constraint ? [chip.constraint] : []));
 
@@ -229,6 +238,8 @@ export default function SemanticSearchPage() {
       {/* The search reads through the API, which requires a logged-in, unblocked account.
           SEE: server/apiAccess.ts */}
       <ApiAccessGate>
+        <SearchWordsPanel onUseExample={fillWithExample} />
+
         <div className="flex flex-wrap items-center gap-2 mb-4" data-cy="semantic-search-examples">
           <span className="text-sm text-gray-600">
             <Trans>Try an example:</Trans>
@@ -250,6 +261,7 @@ export default function SemanticSearchPage() {
 
         <form onSubmit={onSubmit} className="flex gap-2 mb-4" data-cy="semantic-search-form">
           <TextInput
+            ref={inputRef}
             className="flex-1"
             value={input}
             maxLength={500}
