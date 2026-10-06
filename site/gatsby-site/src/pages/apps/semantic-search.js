@@ -2,6 +2,8 @@ import React, { useRef, useState } from 'react';
 import { useLazyQuery } from '@apollo/client';
 import { Trans, useTranslation } from 'react-i18next';
 import { Button, Spinner, TextInput } from 'flowbite-react';
+import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
+import { faChevronRight } from '@fortawesome/free-solid-svg-icons';
 import HeadContent from '../../components/HeadContent';
 import { ApiAccessGate } from '../../components/ui/ApiLoginRequired';
 import SemanticSearchTable from '../../components/semanticSearch/SemanticSearchTable';
@@ -18,16 +20,6 @@ const exampleQueries = [
   'deepfake related incidents',
   'self-driving crashes excluding tesla',
   'lawsuits against openai since 2023',
-];
-
-// The words the search reads as filters, each with what it does. The words stay untranslated,
-// since the search reads them in English.
-const legend = [
-  ['excluding', 'drops an organisation'],
-  ['by', 'made or used by'],
-  ['affecting', 'who was harmed'],
-  ['against', 'harmed group or company'],
-  ['since / before', 'limits the dates'],
 ];
 
 const RESPONSIBLE_ROLES = ['DEPLOYER', 'DEVELOPER', 'IMPLICATED'];
@@ -145,6 +137,11 @@ export default function SemanticSearchPage() {
 
   const inputRef = useRef(null);
 
+  // The search tips panel and the advanced filter controls both start closed on every visit.
+  const [tipsOpen, setTipsOpen] = useState(false);
+
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+
   const [submitted, setSubmitted] = useState('');
 
   // The constraints of the latest search, shown as removable chips and sent with the next one.
@@ -238,7 +235,11 @@ export default function SemanticSearchPage() {
       {/* The search reads through the API, which requires a logged-in, unblocked account.
           SEE: server/apiAccess.ts */}
       <ApiAccessGate>
-        <SearchWordsPanel onUseExample={fillWithExample} />
+        <SearchWordsPanel
+          open={tipsOpen}
+          onClose={() => setTipsOpen(false)}
+          onUseExample={fillWithExample}
+        />
 
         <div className="flex flex-wrap items-center gap-2 mb-4" data-cy="semantic-search-examples">
           <span className="text-sm text-gray-600">
@@ -274,31 +275,70 @@ export default function SemanticSearchPage() {
           </Button>
         </form>
 
-        <p
-          className="-mt-2 mb-4 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500"
-          data-cy="semantic-search-legend"
-        >
-          {legend.map(([word, meaning]) => (
-            <span key={word}>
-              <span className="font-semibold text-gray-700">{word}</span> {t(meaning)}
-            </span>
-          ))}
+        <p className="-mt-2 mb-3 text-xs text-gray-500" data-cy="semantic-search-tips-line">
+          <Trans>For natural language filters,</Trans>{' '}
+          <button
+            type="button"
+            onClick={() => setTipsOpen(true)}
+            aria-expanded={tipsOpen}
+            aria-controls="semantic-search-tips"
+            className="text-blue-700 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-blue-400"
+            data-cy="semantic-search-tips-link"
+          >
+            <Trans>click here</Trans>
+          </button>
         </p>
 
-        <OrganisationFilter chips={entityChips} disabled={loading} onChange={changeEntities} />
+        <button
+          type="button"
+          onClick={() => setAdvancedOpen((wasOpen) => !wasOpen)}
+          aria-expanded={advancedOpen}
+          aria-controls="semantic-search-advanced"
+          className="mb-3 flex items-center gap-2 text-sm text-gray-700 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-gray-300"
+          data-cy="semantic-search-advanced-toggle"
+        >
+          <FontAwesomeIcon
+            icon={faChevronRight}
+            className={`h-3 w-3 transition-transform ${advancedOpen ? 'rotate-90' : ''}`}
+          />
+          <Trans>Advanced search</Trans>
+        </button>
 
-        <AffectedPartyFilter chips={entityChips} disabled={loading} onChange={changeEntities} />
+        {/* The controls mount only while open, so the values they offer load only when wanted.
+            Their filters live in the chips, so closing the section loses nothing. */}
+        <div
+          id="semantic-search-advanced"
+          hidden={!advancedOpen}
+          className="mb-4 rounded-lg border border-gray-200 p-4 pb-0 dark:border-gray-700"
+          data-cy="semantic-search-advanced"
+        >
+          {advancedOpen && (
+            <>
+              <OrganisationFilter
+                chips={entityChips}
+                disabled={loading}
+                onChange={changeEntities}
+              />
 
-        <DateRangeFilter
-          range={dateChips[0]?.filter}
-          disabled={loading}
-          onChange={(range) =>
-            runSearch(input, [
-              ...chips.filter((chip) => !isDateChip(chip)),
-              ...(range ? [{ filter: range }] : []),
-            ])
-          }
-        />
+              <AffectedPartyFilter
+                chips={entityChips}
+                disabled={loading}
+                onChange={changeEntities}
+              />
+
+              <DateRangeFilter
+                range={dateChips[0]?.filter}
+                disabled={loading}
+                onChange={(range) =>
+                  runSearch(input, [
+                    ...chips.filter((chip) => !isDateChip(chip)),
+                    ...(range ? [{ filter: range }] : []),
+                  ])
+                }
+              />
+            </>
+          )}
+        </div>
 
         {loading && <Spinner />}
 

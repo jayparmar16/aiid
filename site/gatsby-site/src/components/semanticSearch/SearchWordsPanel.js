@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faXmark } from '@fortawesome/free-solid-svg-icons';
@@ -29,45 +29,45 @@ const groups = [
 ];
 
 /**
- * A slim tab on the right edge that opens a panel of the words the search understands. It slides
- * over the page, so it takes no room while closed, and it always starts closed. Using an example
+ * A panel of the words the search understands, which slides in from the right over the page, so it
+ * takes no room while closed. Whatever opened it gets focus back when it closes. Using an example
  * hands its text to `onUseExample` and closes the panel without searching.
  */
-export default function SearchWordsPanel({ onUseExample }) {
+export default function SearchWordsPanel({ open, onClose, onUseExample }) {
   const { t } = useTranslation();
-
-  const [open, setOpen] = useState(false);
-
-  const tabRef = useRef(null);
 
   const closeRef = useRef(null);
 
-  // Whether closing hands focus back to the tab. Using an example leaves it to the search box.
+  // The element focused when the panel opened, such as the link that opened it.
+  const opener = useRef(null);
+
+  // Whether closing hands focus back to the opener. Using an example leaves it in the search box.
   const returnFocus = useRef(true);
 
-  const close = (focusTab = true) => {
-    returnFocus.current = focusTab;
-    setOpen(false);
+  const close = (focusOpener = true) => {
+    returnFocus.current = focusOpener;
+    onClose();
   };
 
-  const wasOpen = useRef(false);
-
   useEffect(() => {
-    if (open) {
-      closeRef.current?.focus();
+    if (!open) {
+      if (returnFocus.current) opener.current?.focus();
+      opener.current = null;
 
-      const closeOnEscape = (event) => {
-        if (event.key === 'Escape') close();
-      };
-
-      document.addEventListener('keydown', closeOnEscape);
-
-      wasOpen.current = true;
-
-      return () => document.removeEventListener('keydown', closeOnEscape);
+      return undefined;
     }
 
-    if (wasOpen.current && returnFocus.current) tabRef.current?.focus();
+    opener.current = document.activeElement;
+    returnFocus.current = true;
+    closeRef.current?.focus();
+
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape') close();
+    };
+
+    document.addEventListener('keydown', closeOnEscape);
+
+    return () => document.removeEventListener('keydown', closeOnEscape);
   }, [open]);
 
   const pickExample = (example) => {
@@ -77,18 +77,6 @@ export default function SearchWordsPanel({ onUseExample }) {
 
   return (
     <>
-      <button
-        ref={tabRef}
-        type="button"
-        onClick={() => setOpen(true)}
-        aria-expanded={open}
-        aria-controls="semantic-search-tips"
-        className="fixed bottom-24 right-0 z-30 md:bottom-auto md:top-1/2 md:-translate-y-1/2 rounded-l-md border border-r-0 border-gray-300 bg-white px-1.5 py-3 text-xs text-gray-600 shadow-sm [writing-mode:vertical-rl] hover:text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-300"
-        data-cy="semantic-search-tips-tab"
-      >
-        <Trans>Search tips</Trans>
-      </button>
-
       {open && (
         <div
           className="fixed inset-0 z-40 bg-black/10"

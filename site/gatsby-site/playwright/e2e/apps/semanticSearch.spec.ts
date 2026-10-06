@@ -1,10 +1,16 @@
-import { expect } from '@playwright/test';
+import { expect, Page } from '@playwright/test';
 import { XMLParser } from 'fast-xml-parser';
 import { strFromU8, unzipSync } from 'fflate';
 import { readFile } from 'node:fs/promises';
 import { test } from '../../utils';
 
 const url = '/apps/semantic-search/';
+
+// The organisation, affected party and date controls sit in a collapsed Advanced search section.
+const openAdvancedSearch = async (page: Page) => {
+  await page.locator('[data-cy="semantic-search-advanced-toggle"]').click();
+  await expect(page.locator('[data-cy="semantic-search-advanced"]')).toBeVisible();
+};
 
 // The API returns an interpretation with every status. A query without constraints has nothing in it.
 const unconstrained = { semanticText: '', constraints: [], warnings: [] };
@@ -100,7 +106,49 @@ test.describe('Semantic Search', () => {
     await expect(page.locator('[data-cy="api-login-required"]')).toBeVisible();
     await expect(page.locator('[data-cy="semantic-search-form"]')).toHaveCount(0);
     await expect(page.locator('[data-cy="semantic-search-examples"]')).toHaveCount(0);
-    await expect(page.locator('[data-cy="semantic-search-tips-tab"]')).toHaveCount(0);
+    await expect(page.locator('[data-cy="semantic-search-tips-link"]')).toHaveCount(0);
+    await expect(page.locator('[data-cy="semantic-search-advanced-toggle"]')).toHaveCount(0);
+  });
+
+  test('keeps the filter controls under a collapsed Advanced search until it is opened', async ({
+    page,
+    login,
+  }) => {
+    await login({ customData: { roles: ['subscriber'] } });
+
+    let facetRequests = 0;
+
+    await page.route('**/graphql', async (route) => {
+      if (route.request().postDataJSON().operationName === 'SemanticSearchFacets') facetRequests++;
+      await route.continue();
+    });
+
+    await page.goto(url);
+
+    const toggle = page.locator('[data-cy="semantic-search-advanced-toggle"]');
+    const advanced = page.locator('[data-cy="semantic-search-advanced"]');
+
+    // Only the search bar shows. The controls, and the values they offer, wait until asked for.
+    await expect(page.locator('[data-cy="semantic-search-input"]')).toBeVisible();
+    await expect(toggle).toHaveText('Advanced search');
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(advanced).toBeHidden();
+    await expect(page.locator('[data-cy="semantic-search-organisations"]')).toHaveCount(0);
+    expect(facetRequests).toBe(0);
+
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await expect(
+      advanced.locator('[data-cy="semantic-search-include-organisations"]')
+    ).toBeVisible();
+    await expect(advanced.locator('[data-cy="semantic-search-organisations"]')).toBeVisible();
+    await expect(advanced.locator('[data-cy="semantic-search-affected-parties"]')).toBeVisible();
+    await expect(advanced.locator('[data-cy="semantic-search-dates"]')).toBeVisible();
+    await expect.poll(() => facetRequests).toBeGreaterThan(0);
+
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(advanced).toBeHidden();
   });
 
   test('opens a tips panel whose examples fill the search box without searching', async ({
@@ -118,17 +166,19 @@ test.describe('Semantic Search', () => {
 
     await page.goto(url);
 
-    const tab = page.locator('[data-cy="semantic-search-tips-tab"]');
+    const link = page.locator('[data-cy="semantic-search-tips-link"]');
     const panel = page.locator('[data-cy="semantic-search-tips"]');
     const input = page.locator('[data-cy="semantic-search-input"]');
 
-    // Closed until asked for.
-    await expect(tab).toBeVisible();
+    // Closed until asked for, from the line under the search bar.
+    await expect(page.locator('[data-cy="semantic-search-tips-line"]')).toHaveText(
+      'For natural language filters, click here'
+    );
     await expect(panel).toBeHidden();
 
-    await tab.click();
+    await link.click();
     await expect(panel).toBeVisible();
-    await expect(tab).toHaveAttribute('aria-expanded', 'true');
+    await expect(link).toHaveAttribute('aria-expanded', 'true');
     await expect(panel.locator('h3')).toHaveText([
       'Leave out',
       'Only these',
@@ -142,17 +192,17 @@ test.describe('Semantic Search', () => {
     await expect(input).toHaveValue('crashes excluding tesla');
     await expect(input).toBeFocused();
 
-    await tab.click();
+    await link.click();
     await expect(panel).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(panel).toBeHidden();
-    await expect(tab).toBeFocused();
+    await expect(link).toBeFocused();
 
-    await tab.click();
+    await link.click();
     await page.locator('[data-cy="semantic-search-tips-close"]').click();
     await expect(panel).toBeHidden();
 
-    await tab.click();
+    await link.click();
     await page
       .locator('[data-cy="semantic-search-tips-backdrop"]')
       .click({ position: { x: 10, y: 10 } });
@@ -216,13 +266,6 @@ test.describe('Semantic Search', () => {
     });
 
     await page.goto(url);
-
-    // A short legend of the words the search reads as filters.
-    const legend = page.locator('[data-cy="semantic-search-legend"]');
-
-    for (const word of ['excluding', 'by', 'affecting', 'against', 'since / before']) {
-      await expect(legend).toContainText(word);
-    }
 
     const examples = page.locator('[data-cy="semantic-search-examples"] button');
 
@@ -762,6 +805,7 @@ test.describe('Semantic Search', () => {
     });
 
     await page.goto(url);
+    await openAdvancedSearch(page);
 
     const input = page.locator('[data-cy="semantic-search-input"]');
     const exclusion = page.locator('[data-cy="semantic-search-exclusion"]');
@@ -996,6 +1040,7 @@ test.describe('Semantic Search', () => {
     });
 
     await page.goto(url);
+    await openAdvancedSearch(page);
 
     const input = page.locator('[data-cy="semantic-search-input"]');
     const submit = page.locator('[data-cy="semantic-search-submit"]');
@@ -1127,6 +1172,7 @@ test.describe('Semantic Search', () => {
     });
 
     await page.goto(url);
+    await openAdvancedSearch(page);
 
     const input = page.locator('[data-cy="semantic-search-input"]');
     const inclusion = page.locator('[data-cy="semantic-search-inclusion"]');
@@ -1335,6 +1381,7 @@ test.describe('Semantic Search', () => {
     });
 
     await page.goto(url);
+    await openAdvancedSearch(page);
 
     const option = (control: string, name: string) =>
       page.locator(`#${control}-tags .dropdown-item[aria-label="${name}"]`);
