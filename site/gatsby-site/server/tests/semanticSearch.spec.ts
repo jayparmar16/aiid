@@ -615,6 +615,34 @@ describe('semanticSearch exclusions', () => {
     expect(excludedIds(folded)[0][0]).toBe('tesla');
   });
 
+  it('reads other forms of "excluding", and a misspelt one only before a known name', async () => {
+    embedAs([1, 0]);
+
+    for (const word of ['excludes', 'excluded', 'minus', 'no', 'excludng']) {
+      const response = await search(`self-driving crashes ${word} tesla`);
+
+      expect(interpretationOf(response).semanticText).toBe('self-driving crashes');
+      expect(resultIds(response)).toEqual([12, 13, 15]);
+    }
+
+    const unknown = await search('self-driving crashes excludng robocalls');
+
+    expect(interpretationOf(unknown)).toMatchObject({
+      semanticText: 'self-driving crashes excludng robocalls',
+      constraints: [],
+      warnings: [],
+    });
+  });
+
+  it('takes a possessive with the name, so no "s" is left to search', async () => {
+    embedAs([1, 0]);
+
+    const response = await search("self-driving crashes excluding Tesla's");
+
+    expect(interpretationOf(response).semanticText).toBe('self-driving crashes');
+    expect(excludedIds(response)[0][0]).toBe('tesla');
+  });
+
   it('accepts the start of a name after a strong phrase but not after a weak one', async () => {
     embedAs([1, 0]);
 
@@ -1199,6 +1227,22 @@ describe('semanticSearch exclusions', () => {
       expect(interpretationOf(response).semanticText).toBe('self-driving crashes');
       // 10 and 12 score higher than all of these, but are dated 2018.
       expect(resultIds(response)).toEqual([11, 13, 15]);
+    });
+
+    it('reads a misspelt date word, and "until" as an end date', async () => {
+      embedAs([1, 0]);
+
+      const misspelt = await searchDates('self-driving crashes snce 2023');
+
+      expect(interpretationOf(misspelt).semanticText).toBe('self-driving crashes');
+      expect(resultIds(misspelt)).toEqual([11, 13, 15]);
+
+      const until = await searchDates('self-driving crashes until 2018');
+
+      expect(dateRanges(until)).toEqual([
+        expect.objectContaining({ dateFrom: null, dateTo: '2018-12-31' }),
+      ]);
+      expect(resultIds(until)).toEqual([10, 12]);
     });
 
     it('ends an exclusion where a date phrase begins', async () => {
@@ -2063,6 +2107,21 @@ describe('semanticSearch exclusions', () => {
         ['low-income-tenants', 'economically-vulnerable-people'],
       ]);
       expect(resultIds(response)).toEqual([43, 44]);
+    });
+
+    it('reads other forms of the affected-party words', async () => {
+      for (const word of ['affect', 'affects', 'harms', 'target']) {
+        const response = await searchFor(`failures ${word} students`);
+
+        expect(constraintsOf(response)).toEqual([
+          {
+            kind: 'HARMED_PARTY',
+            source: 'QUERY_TEXT',
+            matchedText: 'students',
+            roles: ['HARMED'],
+          },
+        ]);
+      }
     });
 
     it('means any of the same kind, all of different kinds, and applies exclusions last', async () => {

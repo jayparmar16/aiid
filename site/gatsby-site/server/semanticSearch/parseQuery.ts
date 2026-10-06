@@ -110,9 +110,32 @@ interface NameMatch {
   entities: ResolvedEntity[];
 }
 
-const WORD = /[\p{L}\p{M}\p{N}]+/gu;
+// A word keeps a trailing possessive, so removing "Tesla's" takes the "'s" with it.
+const WORD = /[\p{L}\p{M}\p{N}]+(?:['’]s\b)?/gu;
 
-const normaliseWord = (word: string) => word.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase();
+const normaliseWord = (word: string) =>
+  word
+    .normalize('NFKD')
+    .replace(/\p{M}/gu, '')
+    .toLowerCase()
+    .replace(/['’]s$/, '');
+
+/** Whether the words differ by at most one letter added, dropped or changed, or two swapped. */
+const oneEditApart = (left: string, right: string) => {
+  if (Math.abs(left.length - right.length) > 1) return false;
+
+  let at = 0;
+  while (at < left.length && at < right.length && left[at] === right[at]) at++;
+
+  return (
+    left.slice(at + 1) === right.slice(at) ||
+    left.slice(at) === right.slice(at + 1) ||
+    left.slice(at + 1) === right.slice(at + 1) ||
+    (left[at] === right[at + 1] &&
+      left[at + 1] === right[at] &&
+      left.slice(at + 2) === right.slice(at + 2))
+  );
+};
 
 /** Splits text into lowercase words without accents or punctuation, the form names are matched in. */
 export const toWords = (text: string): string[] =>
@@ -142,11 +165,13 @@ const STRONG_EXCLUSIONS = [
   'not by',
   'not from',
   'excluding',
+  'excludes',
+  'excluded',
   'exclude',
   'except',
 ];
 
-const WEAK_EXCLUSIONS = ['not', 'without'];
+const WEAK_EXCLUSIONS = ['not', 'without', 'no', 'minus'];
 
 const EXCLUSION_PHRASES = [
   ...STRONG_EXCLUSIONS.map((phrase) => ({ words: phrase.split(' '), strong: true })),
@@ -178,7 +203,21 @@ const INCLUSION_PHRASES: InclusionPhrase[] = [
   ...inclusions(['developed by', 'made by', 'built by'], 'INCLUDE_ENTITY', ['developer']),
   ...inclusions(['deployed by', 'used by', 'operated by'], 'INCLUDE_ENTITY', ['deployer']),
   ...inclusions(['by', 'from', 'involving', 'involves'], 'INCLUDE_ENTITY', RESPONSIBLE_ROLES),
-  ...inclusions(['affecting', 'harming', 'targeting'], 'HARMED_PARTY', HARMED_ROLES),
+  ...inclusions(
+    [
+      'affecting',
+      'affects',
+      'affect',
+      'harming',
+      'harms',
+      'harm',
+      'targeting',
+      'targets',
+      'target',
+    ],
+    'HARMED_PARTY',
+    HARMED_ROLES
+  ),
   { words: ['against'], kind: 'HARMED_PARTY', roles: HARMED_ROLES, eitherRole: true },
 ];
 
@@ -359,6 +398,10 @@ const DATE_PHRASES: { slots: string[]; bounds: (numbers: number[], now: Date) =>
     },
   ]),
   {
+    slots: ['until|through', 'YEAR'],
+    bounds: ([year]) => ({ dateFrom: null, dateTo: endOf(year) }),
+  },
+  {
     slots: ['since|from', 'YEAR'],
     bounds: ([year]) => ({ dateFrom: startOf(year), dateTo: null }),
   },
@@ -435,7 +478,12 @@ export const parseQuery = (query: string, vocabulary: Vocabulary, now: Date): In
           tokens[index + offset]?.word === word &&
           (offset === 0 || !BREAK.test(gapBefore(index + offset)))
       )
-    );
+    ) ??
+    // A misspelt "excluding" acts only on a known name, like the weak phrases, so a typo in some
+    // other word is never taken for an exclusion.
+    (oneEditApart(tokens[index].word, 'excluding')
+      ? { words: ['excluding'], strong: false }
+      : undefined);
 
   /** The inclusion phrase starting at `index`, except "from" before a year, which is a date. */
   const inclusionAt = (index: number) => {
@@ -465,7 +513,14 @@ export const parseQuery = (query: string, vocabulary: Vocabulary, now: Date): In
         const gap = offset > 0 ? gapBefore(index + offset) : '';
         if (slot === '-YEAR' ? !DASH.test(gap) : BREAK.test(gap)) return false;
 
-        if (!['YEAR', '-YEAR', 'COUNT'].includes(slot)) return slot.split('|').includes(token.word);
+        // A year must follow, so a date word of five letters or more may have one typo.
+        if (!['YEAR', '-YEAR', 'COUNT'].includes(slot)) {
+          return slot
+            .split('|')
+            .some(
+              (word) => word === token.word || (word.length > 4 && oneEditApart(word, token.word))
+            );
+        }
 
         const number = slot === 'COUNT' ? countIn(token.word) : yearIn(token.word);
         if (number !== null) numbers.push(number);
