@@ -203,7 +203,14 @@ test.describe('Semantic Search', () => {
     await expect(firstRow.locator('[data-cy="cell"]').last()).toHaveText('0.300');
 
     await page.locator('[data-cy="semantic-search-score-help"]').hover();
-    await expect(page.getByText('0.4–1.0: closely matches what you described')).toBeVisible();
+    const scoreGuide = page.locator('[data-cy="semantic-search-score-guide"]');
+
+    await expect(scoreGuide).toBeVisible();
+    await expect(scoreGuide.locator('li')).toHaveText([
+      '0.4–0.65: strong matches',
+      '0.25–0.4: related but looser matches',
+      'Below about 0.16: unrelated topics',
+    ]);
 
     await page.locator('[data-cy="last-page"]').click();
     await expect(page.locator('[data-cy="row"]')).toHaveCount(5);

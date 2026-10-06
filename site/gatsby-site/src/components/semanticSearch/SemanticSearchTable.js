@@ -50,6 +50,13 @@ function SortHeader({ column }) {
   );
 }
 
+// What score ranges mean, from real searches.
+const scoreGuide = [
+  ['0.4–0.65', 'strong matches'],
+  ['0.25–0.4', 'related but looser matches'],
+  ['Below about 0.16', 'unrelated topics'],
+];
+
 // The score header adds a hint on what a good score is. The hint sits outside the sort button, so
 // hovering or clicking it never changes the order.
 function ScoreHeader({ column }) {
@@ -60,9 +67,16 @@ function ScoreHeader({ column }) {
       <SortHeader column={column} />
       <Tooltip
         content={
-          <span className="whitespace-nowrap normal-case">
-            {t('0.4–1.0: closely matches what you described')}
-          </span>
+          <ul
+            className="whitespace-nowrap normal-case text-left"
+            data-cy="semantic-search-score-guide"
+          >
+            {scoreGuide.map(([range, meaning]) => (
+              <li key={range}>
+                <span className="font-semibold">{t(range)}:</span> {t(meaning)}
+              </li>
+            ))}
+          </ul>
         }
       >
         <button
