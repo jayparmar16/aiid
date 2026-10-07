@@ -8,6 +8,11 @@ import { hideBin } from 'yargs/helpers';
 
 import { createEmbeddingProvider, EmbeddingRequestError } from '../utils/embeddings/provider';
 import {
+  EMBEDDING_SCHEMA_VERSION,
+  EMBEDDINGS_COLLECTION,
+  getEmbeddingIndexConfig,
+} from '../utils/embeddings/config';
+import {
   buildIncidentOverview,
   chunkTextWithOffsets,
   getReportBody,
@@ -16,13 +21,9 @@ import {
 } from '../utils/embeddings/incidentText';
 
 const DB_NAME = 'aiidprod';
-const EMBEDDINGS_COLLECTION = 'incident_embeddings';
-const EMBEDDING_SCHEMA_VERSION = 2;
 const FAILURES_FILE = 'embed-failures.json';
 const PROGRESS_EVERY = 50;
 const MAX_CONSECUTIVE_FAILURES = 10;
-const DEFAULT_MAX_INPUT_CHARS = 8000;
-const DEFAULT_CHUNK_OVERLAP_CHARS = 200;
 const DEFAULT_BATCH_SIZE = 32;
 const MAX_REBUDGET_ATTEMPTS = 3;
 const MIN_INPUT_CHARS = 500;
@@ -146,17 +147,8 @@ const main = async (): Promise<number> => {
   if (argv.limit !== undefined) assertPositiveInteger(argv.limit, '--limit');
   for (const id of argv['incident-id'] || []) assertPositiveInteger(id, '--incident-id');
 
-  const provider = createEmbeddingProvider();
-  const maxInputChars = positiveInteger(
-    process.env.EMBEDDING_MAX_INPUT_CHARS,
-    DEFAULT_MAX_INPUT_CHARS,
-    'EMBEDDING_MAX_INPUT_CHARS'
-  );
-  const overlapChars = positiveInteger(
-    process.env.EMBEDDING_CHUNK_OVERLAP_CHARS,
-    DEFAULT_CHUNK_OVERLAP_CHARS,
-    'EMBEDDING_CHUNK_OVERLAP_CHARS'
-  );
+  const provider = createEmbeddingProvider({ onRetry: (message) => console.warn(message) });
+  const { maxInputChars, overlapChars, indexSignature } = getEmbeddingIndexConfig(provider);
   const batchSize = positiveInteger(
     process.env.EMBEDDING_BATCH_SIZE,
     DEFAULT_BATCH_SIZE,
@@ -168,20 +160,6 @@ const main = async (): Promise<number> => {
     'EMBEDDING_CONCURRENCY'
   );
 
-  if (overlapChars >= maxInputChars) {
-    throw new Error('EMBEDDING_CHUNK_OVERLAP_CHARS must be smaller than EMBEDDING_MAX_INPUT_CHARS');
-  }
-
-  const indexSignature = sha256(
-    JSON.stringify({
-      schema: EMBEDDING_SCHEMA_VERSION,
-      model: provider.model,
-      baseUrl: provider.baseUrl,
-      profile: provider.profileId,
-      maxInputChars,
-      overlapChars,
-    })
-  );
   const client = new MongoClient(connectionString);
   await client.connect();
 

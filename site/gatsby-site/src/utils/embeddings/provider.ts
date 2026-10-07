@@ -126,7 +126,14 @@ const validateVectors = (data: unknown, expectedCount: number): number[][] => {
   return ordered;
 };
 
-export const createEmbeddingProvider = (): EmbeddingProvider => {
+export interface ProviderOptions {
+  timeoutMs?: number;
+  maxAttempts?: number;
+  onRetry?: (message: string) => void;
+}
+
+/** Caller limits let interactive requests fail fast while ingestion keeps its retry defaults. */
+export const createEmbeddingProvider = (options: ProviderOptions = {}): EmbeddingProvider => {
   const baseUrl = (process.env.EMBEDDING_API_BASE_URL || 'https://openrouter.ai/api/v1').replace(
     /\/+$/,
     ''
@@ -136,9 +143,18 @@ export const createEmbeddingProvider = (): EmbeddingProvider => {
 
   if (!apiKey) throw new Error('EMBEDDING_API_KEY is required.');
 
-  const timeoutMs = positiveInteger(process.env.EMBEDDING_TIMEOUT_MS, 120_000);
-  const maxAttempts = positiveInteger(process.env.EMBEDDING_MAX_ATTEMPTS, 6);
+  const timeoutMs = positiveInteger(
+    options.timeoutMs === undefined ? process.env.EMBEDDING_TIMEOUT_MS : String(options.timeoutMs),
+    120_000
+  );
+  const maxAttempts = positiveInteger(
+    options.maxAttempts === undefined
+      ? process.env.EMBEDDING_MAX_ATTEMPTS
+      : String(options.maxAttempts),
+    6
+  );
   const profile = resolveEmbeddingProfile(model);
+  const onRetry = options.onRetry || (() => undefined);
 
   const embed = async (
     texts: string[],
@@ -199,7 +215,7 @@ export const createEmbeddingProvider = (): EmbeddingProvider => {
 
         if (attempt < maxAttempts) {
           const waitMs = retryAfter ?? backoffDelay(attempt);
-          console.warn(
+          onRetry(
             `attempt ${attempt}/${maxAttempts} status=${response.status}` +
               `${retryAfter === null ? '' : ` retry_after=${seconds(retryAfter)}`}` +
               ` waiting ${seconds(waitMs)}`
@@ -216,9 +232,7 @@ export const createEmbeddingProvider = (): EmbeddingProvider => {
 
         if (attempt < maxAttempts) {
           const waitMs = backoffDelay(attempt);
-          console.warn(
-            `attempt ${attempt}/${maxAttempts} ${lastMessage} waiting ${seconds(waitMs)}`
-          );
+          onRetry(`attempt ${attempt}/${maxAttempts} ${lastMessage} waiting ${seconds(waitMs)}`);
           await sleep(waitMs);
         }
       } finally {

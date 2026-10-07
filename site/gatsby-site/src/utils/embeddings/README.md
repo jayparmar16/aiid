@@ -79,8 +79,38 @@ The model name selects an optional local request profile. The Nemotron embedding
 Unrecognized models add no vendor-specific fields, so switching an OpenAI-compatible model normally
 requires only changing `EMBEDDING_MODEL` and, if necessary, `EMBEDDING_API_BASE_URL`.
 
+`createEmbeddingProvider({timeoutMs, maxAttempts, onRetry})` supports caller limits for future
+interactive consumers. Without overrides, ingestion retains its existing timeout and retry
+defaults. Retry messages are opt-in; the ingestion CLI supplies a warning callback.
+
 Provider responses are rejected if indices are missing or duplicated, dimensions differ, or a
 vector is empty or contains non-finite values. Large incidents are sent in bounded batches.
+
+## Shared backend helpers
+
+`config.ts` owns the schema version, collection name, chunk settings, and index signature used by
+ingestion. `getEmbeddingIndexConfig({model, baseUrl, profileId})` does not need API credentials and
+retains the original signature format, so this extraction does not invalidate existing backfills.
+
+`vectors.ts` reuses the vector logic from `feature-rag-search` without importing its GraphQL field
+or UI. `createIncidentVectorLoader().load(client, index, dimensions, databaseName?)` streams only
+documents matching schema, endpoint, model, profile, signature, and dimensions. It rejects malformed
+overview vectors, drops malformed passages, and normalizes Float32 copies. Each loader owns a
+ten-minute cache isolated by MongoDB client, database, and embedding configuration; `clear()`
+invalidates it. Empty results are not cached, so newly backfilled documents can be read immediately.
+
+`rankIncidentVectors(incidents, query, limit, minimumScore?)` ranks normalized corpus vectors using
+65% overview cosine similarity and 35% best-passage similarity, with a default minimum of 0.15.
+An incident without passages uses its overview score. Ties are ordered by incident ID.
+
+These helpers are backend-only. Piece 1 of the Longformer replacement does not connect them to
+existing consumers: submission suggestions, stored relations, and the spatial view retain their
+current behavior until their respective migration pieces.
+
+The isolated CLI smoke test (`server/tests/embeddingPipeline.spec.ts`) embeds five seeded incidents
+against a temporary MongoDB and local test provider, checks bounded batches and compact vectors,
+and verifies unchanged resume, changed report text, and changed chunk configuration. It uses no
+live database or provider credentials.
 
 ## Run locally
 

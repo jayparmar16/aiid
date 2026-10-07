@@ -95,6 +95,80 @@ describe('embedding provider profiles and validation', () => {
     expect(resolveEmbeddingProfile('vendor/new-model').id).toBe('openai-compatible-v1');
   });
 
+  it('embeds Nemotron query inputs with the query profile', async () => {
+    process.env.EMBEDDING_MODEL = 'nvidia/nemotron-3-embed-1b:free';
+    const fetchMock = jest.fn().mockResolvedValue(
+      new Response(JSON.stringify({ data: [{ index: 0, embedding: [0.1, 0.2] }] }), {
+        status: 200,
+      })
+    );
+    global.fetch = fetchMock;
+    await createEmbeddingProvider().embed(['query'], 'query');
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).input_type).toBe('query');
+  });
+
+  it('allows caller limits and reports retries only through the supplied callback', async () => {
+    process.env.EMBEDDING_MODEL = 'vendor/new-model';
+    const onRetry = jest.fn();
+    global.fetch = jest
+      .fn()
+      .mockResolvedValueOnce(
+        new Response('try again', {
+          status: 429,
+          headers: { 'Retry-After': '0' },
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            data: [{ index: 0, embedding: [0.1, 0.2] }],
+          }),
+          { status: 200 }
+        )
+      );
+
+    const provider = createEmbeddingProvider({ timeoutMs: 8000, maxAttempts: 2, onRetry });
+    expect(provider.timeoutMs).toBe(8000);
+    expect(provider.maxAttempts).toBe(2);
+    expect((await provider.embed(['query'])).attempts).toBe(2);
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects invalid caller limits and honors a single-attempt request', async () => {
+    expect(() => createEmbeddingProvider({ timeoutMs: 0 })).toThrow('positive integer');
+    expect(() => createEmbeddingProvider({ maxAttempts: 1.5 })).toThrow('positive integer');
+    global.fetch = jest.fn().mockRejectedValue(new Error('provider unavailable'));
+    await expect(createEmbeddingProvider({ maxAttempts: 1 }).embed(['query'])).rejects.toThrow(
+      'gave up after 1 attempts'
+    );
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('aborts a request at the caller timeout', async () => {
+    jest.useFakeTimers();
+    try {
+      global.fetch = jest.fn().mockImplementation(
+        (_url, { signal }) =>
+          new Promise((_resolve, reject) => {
+            signal.addEventListener('abort', () =>
+              reject(
+                Object.assign(new Error('aborted'), {
+                  name: 'AbortError',
+                })
+              )
+            );
+          })
+      );
+      const request = expect(
+        createEmbeddingProvider({ timeoutMs: 8000, maxAttempts: 1 }).embed(['query'])
+      ).rejects.toThrow('timeout after 8s');
+      await jest.advanceTimersByTimeAsync(8000);
+      await request;
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('rejects duplicate response indices', async () => {
     process.env.EMBEDDING_MODEL = 'vendor/new-model';
     global.fetch = jest.fn().mockResolvedValue(
@@ -116,14 +190,12 @@ describe('embedding provider profiles and validation', () => {
 
   it('rejects non-finite vector values', async () => {
     process.env.EMBEDDING_MODEL = 'vendor/new-model';
-    global.fetch = jest
-      .fn()
-      .mockResolvedValue(
-        new Response(JSON.stringify({ data: [{ index: 0, embedding: [0.1, null] }] }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        })
-      );
+    global.fetch = jest.fn().mockResolvedValue(
+      new Response(JSON.stringify({ data: [{ index: 0, embedding: [0.1, null] }] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
 
     await expect(createEmbeddingProvider().embed(['one'])).rejects.toThrow(
       'empty or contains non-numbers'
