@@ -2,7 +2,7 @@
 
 This pipeline prepares incident data for semantic retrieval. It writes one document per incident
 to `aiidprod.incident_embeddings`. Interactive suggestions now read this representation; the
-spatial view and persisted-neighbor refresh are separate migration pieces.
+spatial view also uses these overview embeddings. Persisted-neighbor refresh remains a later piece.
 
 ## Representation
 
@@ -104,8 +104,9 @@ invalidates it. Empty results are not cached, so newly backfilled documents can 
 65% overview cosine similarity and 35% best-passage similarity, with a default minimum of 0.15.
 An incident without passages uses its overview score. Ties are ordered by incident ID.
 
-These helpers are backend-only. Piece 2 replaces submission/incident-form suggestions; the spatial
-view, legacy vector writers, and existing historical data remain unchanged for later pieces.
+These helpers are backend-only. Piece 2 replaces submission/incident-form suggestions, and Piece 3
+replaces the spatial projection input. Legacy vector writers, persisted-neighbor refresh, and
+historical data remain unchanged for later pieces.
 
 ## Interactive suggestions (Piece 2)
 
@@ -144,6 +145,36 @@ The isolated CLI smoke test (`server/tests/embeddingPipeline.spec.ts`) embeds fi
 against a temporary MongoDB and local test provider, checks bounded batches and compact vectors,
 and verifies unchanged resume, changed report text, and changed chunk configuration. It uses no
 live database or provider credentials.
+
+## Spatial view (Piece 3)
+
+The existing Gatsby page build still computes t-SNE and persists `incidents.tsne.x/y`. Its source
+is now the normalized schema-v2 `overview.vector` in `incident_embeddings`; report passages and
+legacy `incidents.embedding.vector` are never used. The shared index filter requires matching
+schema, model, endpoint, profile, and chunk signature. Malformed vectors and deleted incidents are
+skipped; mixed valid dimensions fail before coordinate writes.
+
+This build needs `MONGODB_CONNECTION_STRING` with read access to `incident_embeddings` and read/write
+access to `incidents` in the source database, not the translations database. It uses the same
+`EMBEDDING_MODEL`, endpoint, and chunk configuration as ingestion, but requires no embedding API key
+and makes no provider calls. `TSNE_NITER` defaults to 1000 and must be a positive integer.
+
+Projection uses Euclidean distance between normalized overviews, retaining the existing t-SNE
+parameters but bounding perplexity by corpus size. Zero inputs yield no coordinates; one input is
+centered; two inputs are placed at opposite horizontal endpoints. All output must be finite and
+within `[-1, 1]`. Writes are awaited and the owned MongoDB client is always closed.
+
+The page context uses this build's returned coordinates because Gatsby's sourced incident nodes
+predate those writes. It omits incompatible incidents even if their old coordinates still exist.
+An empty compatible corpus produces an explicit empty view and build warning, never a legacy
+fallback. Existing vectors and excluded incidents' historical coordinates are preserved. A link
+to an incident not present in the current projection shows the available plot without highlighting.
+
+The CommonJS Gatsby hook temporarily registers the existing `tsx` loader to import shared
+TypeScript helpers and immediately unregisters it. The local bridge smoke test runs a plain Node
+child process against an ephemeral MongoDB, with the translations URI deliberately unavailable.
+Tests in `spatialEmbeddings.spec.ts`, `spatialPage.spec.ts`, and the Chromium `spatialView.spec.ts`
+cover the projection, persistence, current-build page context, and rendering without remote access.
 
 ## Run locally
 

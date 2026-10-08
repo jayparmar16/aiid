@@ -1,8 +1,8 @@
 /** Backend-only schema-v2 vector loading and ranking, reused from feature-rag-search. */
 import { Binary, type MongoClient } from 'mongodb';
 import {
-  EMBEDDING_SCHEMA_VERSION,
   EMBEDDINGS_COLLECTION,
+  getEmbeddingIndexFilter,
   type EmbeddingIndexConfig,
 } from './config';
 
@@ -98,14 +98,7 @@ export const createIncidentVectorLoader = () => {
     if (!Number.isInteger(dimensions) || dimensions <= 0) {
       throw new Error('dimensions must be a positive integer');
     }
-    const filter = {
-      embedding_schema_version: EMBEDDING_SCHEMA_VERSION,
-      embedding_profile: index.profileId,
-      model: index.model,
-      base_url: index.baseUrl,
-      index_signature: index.indexSignature,
-      dims: dimensions,
-    };
+    const filter = getEmbeddingIndexFilter(index, dimensions);
     const key = JSON.stringify({ databaseName, ...filter });
     const cached = cache.get(client);
     if (cached?.key === key && Date.now() - cached.loadedAt < CACHE_TTL_MS) {

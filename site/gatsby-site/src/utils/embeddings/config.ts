@@ -1,6 +1,6 @@
 /** Representation settings shared by ingestion and readers of its schema-v2 corpus. */
 import { createHash } from 'crypto';
-import type { EmbeddingProvider } from './provider';
+import { getEmbeddingProviderSettings, type EmbeddingProvider } from './provider';
 
 export const EMBEDDING_SCHEMA_VERSION = 2;
 export const EMBEDDINGS_COLLECTION = 'incident_embeddings';
@@ -63,3 +63,16 @@ export const getEmbeddingIndexConfig = (
     indexSignature,
   };
 };
+
+/** Build-time readers use the same environment/defaults as ingestion, without an API key. */
+export const getConfiguredEmbeddingIndex = (): EmbeddingIndexConfig =>
+  getEmbeddingIndexConfig(getEmbeddingProviderSettings());
+
+export const getEmbeddingIndexFilter = (index: EmbeddingIndexConfig, dimensions?: number) => ({
+  embedding_schema_version: EMBEDDING_SCHEMA_VERSION,
+  embedding_profile: index.profileId,
+  model: index.model,
+  base_url: index.baseUrl,
+  index_signature: index.indexSignature,
+  ...(dimensions === undefined ? {} : { dims: dimensions }),
+});

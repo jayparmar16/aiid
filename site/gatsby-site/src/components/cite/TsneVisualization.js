@@ -99,8 +99,7 @@ export default function TsneVisualization({
   }, [axis]);
 
   return (
-    incidents &&
-    (currentSpatialIncident || !currentIncidentId || currentIncidentId < 1) && (
+    incidents && (
       <>
         <VisualizationLayout>
           <VisualizationView

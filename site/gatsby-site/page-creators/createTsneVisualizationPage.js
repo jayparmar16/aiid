@@ -6,8 +6,16 @@ const { updateTsneInDatabase } = require('../src/utils/updateTsne');
 
 const { switchLocalizedPath } = require('../i18n');
 
-const createTsneVisualizationPage = async (graphql, createPage) => {
-  await updateTsneInDatabase();
+const createTsneVisualizationPage = async (graphql, createPage, { reporter } = {}) => {
+  const positions = await updateTsneInDatabase();
+
+  if (positions.length === 0) {
+    reporter?.warn(
+      'Spatial view has no compatible schema-v2 overview embeddings; no legacy fallback is used.'
+    );
+  }
+
+  const positionsById = new Map(positions.map((position) => [position.incident_id, position.tsne]));
 
   const csetClassifications = [
     'Sector of Deployment',
@@ -22,20 +30,21 @@ const createTsneVisualizationPage = async (graphql, createPage) => {
 
   const result = await graphql(`
     query SpatialIncidents {
-      allMongodbAiidprodIncidents(filter: { tsne: { x: { ne: null }, y: { ne: null } } }) {
+      allMongodbAiidprodIncidents {
         nodes {
           incident_id
           title
-          tsne {
-            x
-            y
-          }
         }
       }
     }
   `);
 
-  const spatialIncidents = result.data.allMongodbAiidprodIncidents.nodes;
+  if (result.errors) throw new Error('Could not retrieve incidents for the spatial view');
+
+  // Gatsby sourced these nodes before the database update; use this build's fresh coordinates.
+  const spatialIncidents = result.data.allMongodbAiidprodIncidents.nodes
+    .filter((incident) => positionsById.has(incident.incident_id))
+    .map((incident) => ({ ...incident, tsne: positionsById.get(incident.incident_id) }));
 
   const incidentIds = spatialIncidents.map((incident) => incident.incident_id);
 

@@ -59,6 +59,16 @@ export const resolveEmbeddingProfile = (model: string): EmbeddingProfile => {
 };
 
 const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+/** Reader configuration does not require credentials or make a provider request. */
+export const getEmbeddingProviderSettings = () => {
+  const baseUrl = (process.env.EMBEDDING_API_BASE_URL || 'https://openrouter.ai/api/v1').replace(
+    /\/+$/,
+    ''
+  );
+  const model = process.env.EMBEDDING_MODEL || 'nvidia/nemotron-3-embed-1b:free';
+  return { model, baseUrl, profileId: resolveEmbeddingProfile(model).id };
+};
 const BASE_BACKOFF_MS = 2000;
 const MAX_BACKOFF_MS = 60_000;
 const MAX_RETRY_AFTER_MS = MAX_BACKOFF_MS;
@@ -135,11 +145,7 @@ export interface ProviderOptions {
 
 /** Caller limits let interactive requests fail fast while ingestion keeps its retry defaults. */
 export const createEmbeddingProvider = (options: ProviderOptions = {}): EmbeddingProvider => {
-  const baseUrl = (process.env.EMBEDDING_API_BASE_URL || 'https://openrouter.ai/api/v1').replace(
-    /\/+$/,
-    ''
-  );
-  const model = process.env.EMBEDDING_MODEL || 'nvidia/nemotron-3-embed-1b:free';
+  const { baseUrl, model } = getEmbeddingProviderSettings();
   const apiKey = process.env.EMBEDDING_API_KEY;
 
   if (!apiKey) throw new Error('EMBEDDING_API_KEY is required.');
