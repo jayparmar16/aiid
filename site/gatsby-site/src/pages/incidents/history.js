@@ -142,6 +142,8 @@ function IncidentHistoryPage(props) {
 
         const updatedIncident = {
           ...version,
+          // Legacy vectors are read-only, including when restoring an older content version.
+          embedding: undefined,
           modifiedByUser: undefined,
           modifiedBy: undefined,
           __typename: undefined,
@@ -174,10 +176,6 @@ function IncidentHistoryPage(props) {
               return { ...nlp, __typename: undefined };
             })
           : [];
-
-        if (version.embedding) {
-          updatedIncident.embedding = { ...version.embedding, __typename: undefined };
-        }
 
         if (version.tsne) {
           updatedIncident.tsne = { ...version.tsne, __typename: undefined };

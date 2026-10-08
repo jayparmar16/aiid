@@ -117,9 +117,8 @@ function IncidentHistoryPage() {
           changes: undefined,
           date_modified: new Date(),
           editor_notes: version.editor_notes ? version.editor_notes : '',
-          embedding: version.embedding
-            ? { ...version.embedding, __typename: undefined }
-            : undefined,
+          // Historical vectors remain readable, but restoring text must not restore a vector.
+          embedding: undefined,
         };
 
         await updateReport({

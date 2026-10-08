@@ -53,7 +53,7 @@ const SubmissionEdit = ({ id }) => {
 
   const handleSubmit = async (values) => {
     try {
-      const update = { ...values, __typename: undefined, _id: undefined };
+      const update = { ...values, embedding: undefined, __typename: undefined, _id: undefined };
 
       const { entities } = entitiesData;
 

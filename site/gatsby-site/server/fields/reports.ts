@@ -89,6 +89,7 @@ export const mutationFields: GraphQLFieldConfigMap<any, any> = {
         collectionName: 'reports',
         Type: ReportType,
         generateFields: ['updateOne', 'deleteOne', 'insertOne'],
+        readOnlyFields: ['embedding'],
         onResolve: async (operation, context, params) => {
 
             const { result } = params!;

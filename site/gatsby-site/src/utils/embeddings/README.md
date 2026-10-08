@@ -106,7 +106,7 @@ An incident without passages uses its overview score. Ties are ordered by incide
 
 These helpers are backend-only. Piece 2 replaces submission/incident-form suggestions, and Piece 3
 replaces the spatial projection input. Piece 4 refreshes persisted machine-generated neighbors.
-Legacy vector writers and historical data remain unchanged until the final migration piece.
+Piece 5 retires legacy vector writers while preserving stored vectors and history for compatibility.
 
 ## Interactive suggestions (Piece 2)
 
@@ -217,6 +217,37 @@ bounded persistence, and the existing localized citation-page builder. `embeddin
 parses the checked-in workflow and checks its Bash commands offline. Neither accesses GitHub or
 any deployed environment. Existing site builds consume the refreshed lists; this job does not
 trigger or publish a new site build.
+
+## Legacy write retirement (Piece 5)
+
+The API no longer averages report vectors when linking reports or creating incidents, and
+submission promotion no longer copies or averages submission vectors into reports/incidents.
+Linking, report classification, notifications, and history snapshots still run. Promotion snapshots
+are taken after report linking and preserve any existing frozen incident vector.
+
+Legacy `embedding` fields remain queryable in the GraphQL schema, including historical versions.
+Incident, report, and submission mutation inputs still accept them for older-client compatibility,
+but discard them on insert/update, including null and flattened nested updates. Legacy-only
+single-document updates are no-ops without extra history or notifications. Current forms and
+history restores omit these inputs; normal editor queries no longer fetch them. Restoring content
+does not restore an old vector. Historical serializers continue to preserve archived values.
+
+No data migration deletes or rewrites existing legacy vectors. These fields are frozen and unused
+by interactive suggestions, spatial projection, or stored-neighbor refresh. Content edits, restores,
+promotions, and report-link changes are picked up by the schema-v2 pipeline's source hash on the
+next nightly or manual ingestion. There is no inline provider call during editor mutations; stored
+neighbors and spatial coordinates remain eventual updates, not immediate editor-side recomputations.
+
+`legacyEmbeddingRetirement.spec.ts` uses an isolated local MongoDB and GraphQL server to exercise
+legacy-client inserts/updates, history restores, relinking/unlinking, and promotion with/without old
+vectors. It checks that archived vectors and the schema-v2 collection are untouched. GraphQL
+document tests check that regenerated client documents match the active queries and history reads.
+
+The 2022 similarity migration and published Longformer blog/architecture snapshots are historical
+artifacts and remain unchanged; do not rerun that migration for the new pipeline. The external
+`nlp-lambdas` service, its schedules, and AWS resources are outside this repository. Their shutdown
+requires a separately authorized operational cutover after a compatible schema-v2 backfill and
+deployment. This change does not disable external writers, push code, deploy, or verify staging.
 
 ## Run locally
 

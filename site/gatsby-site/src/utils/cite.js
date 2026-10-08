@@ -145,6 +145,7 @@ export const sortIncidentsByDatePublished = (incidentReports) => {
   });
 };
 
+// Historical serialization preserves archived vectors; current incident mutations ignore them.
 // Transforms the data from the graphql query into a History_incidentInsertInput format
 export const transformIncidentData = (incident, user) => {
   const result = {

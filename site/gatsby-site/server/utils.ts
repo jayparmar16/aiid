@@ -582,6 +582,7 @@ const defaultMutationFields: MutationFields[] = ['deleteOne', 'deleteMany', 'ins
  * @param {string} [params.databaseName='aiidprod'] - The name of the database containing the collection. Defaults to 'aiidprod'.
  * @param {GraphQLObjectType<any, any>} params.Type - The GraphQL object type representing the structure of the collection's documents.
  * @param {MutationFields[]} [params.generateFields=defaultMutationFields] - An array specifying which mutation fields to generate. Defaults to all available mutations.
+ * @param {readonly string[]} [params.readOnlyFields=[]] - Compatibility fields accepted by the schema but ignored on writes, including their dotted subfields.
  * @param {Function} [params.onResolve] - Optional callback function to be called after certain mutation operations (insertOne, updateOne).
  * @param {Function} params.onResolve.operation - The type of operation being performed ('insertOne' or 'updateOne').
  * @param {Object} params.onResolve.context - The context object passed to the resolver.
@@ -608,12 +609,14 @@ export function generateMutationFields({
     Type,
     generateFields = defaultMutationFields,
     onResolve = undefined,
+    readOnlyFields = [],
 }:
     {
         collectionName: string,
         databaseName?: string,
         Type: GraphQLObjectType<any, any>,
         generateFields?: MutationFields[],
+        readOnlyFields?: readonly string[],
         onResolve?: (operation: Extract<MutationFields, 'insertOne' | 'updateOne'>, context: Context, params?: { initial?: any, result?: any }) => Promise<any>
     }): GraphQLFieldConfigMap<any, any> {
 
@@ -621,6 +624,14 @@ export function generateMutationFields({
     const pluralName = capitalize(pluralize(collectionName));
 
     const fields: GraphQLFieldConfigMap<any, any> = {};
+
+    // Keep historical fields in the schema for old clients, but never persist their input.
+    // MongoDB's flattened dotted paths must be protected as well as whole-field values.
+    const writableFields = (data: Data): Data => Object.fromEntries(
+        Object.entries(data).filter(([key]) => !readOnlyFields.some(
+            (field) => key === field || key.startsWith(`${field}.`)
+        ))
+    );
 
     if (generateFields.includes('deleteOne')) {
 
@@ -671,6 +682,7 @@ export function generateMutationFields({
 
                     let insert = await parseRelationshipFields(Type, data, getMongoDbUpdate({ set: data }).update, context);
                     insert = await parseDBMappings(Type, insert);
+                    insert = writableFields(insert);
 
                     const db = context.client.db(databaseName);
                     const collection = db.collection(collectionName);
@@ -713,7 +725,7 @@ export function generateMutationFields({
 
                     const insert = await Promise.all(data.map(async (item) => {
                         const result = await parseRelationshipFields(Type, item, getMongoDbUpdate({ set: item }).update, context);
-                        return await parseDBMappings(Type, result);
+                        return writableFields(await parseDBMappings(Type, result));
                     }));
 
                     const result = await collection.insertMany(insert);
@@ -747,8 +759,11 @@ export function generateMutationFields({
 
                     let update = await parseRelationshipFields(Type, args.update.set, mongoUpdate, context);
                     update = await parseDBMappings(Type, update);
+                    update = writableFields(update);
 
                     const initial = await collection.findOne(filter);
+
+                    if (readOnlyFields.length > 0 && Object.keys(update).length === 0) return initial;
 
                     await collection.updateOne(filter, { $set: update }, options);
 
@@ -788,6 +803,7 @@ export function generateMutationFields({
 
                     let update = await parseRelationshipFields(Type, args.update.set, mongoUpdate, context);
                     update = await parseDBMappings(Type, update);
+                    update = writableFields(update);
 
                     const result = await collection.updateMany(filter, { $set: update }, options);
 
@@ -821,6 +837,7 @@ export function generateMutationFields({
 
                     let update: any = await parseRelationshipFields(Type, args.update, mongoUpdate, context);
                     update = await parseDBMappings(Type, update);
+                    update = writableFields(update);
 
                     await collection.updateOne(filter, { $set: update, $setOnInsert: { created_at: new Date() } }, { ...projection, upsert: true });
 

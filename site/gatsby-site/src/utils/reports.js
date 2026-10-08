@@ -1,6 +1,7 @@
 import { Operation, diff } from 'json-diff-ts';
 import supportedLanguages from '../components/i18n/languages.json';
 
+// Historical serialization preserves archived vectors; current report mutations ignore them.
 // Transforms the data from the graphql query into a History_reportInsertInput format
 export const transformReportData = (report, user) => {
   const result = {

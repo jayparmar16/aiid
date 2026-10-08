@@ -89,9 +89,7 @@ function NewIncidentPage() {
         // they stay linked to the incidents they already belong to. SEE: #4052
         reports: { link: values.reports || [] },
         editors: { link: values.editors },
-        embedding: {
-          ...values.embedding,
-        },
+        embedding: undefined,
         date_modified: new Date(),
       };
 
