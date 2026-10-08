@@ -2,7 +2,7 @@
 
 This pipeline prepares incident data for semantic retrieval. It writes one document per incident
 to `aiidprod.incident_embeddings`. Interactive suggestions now read this representation; the
-spatial view also uses these overview embeddings. Persisted-neighbor refresh remains a later piece.
+spatial view and persisted-neighbor refresh also use the schema-v2 representation.
 
 ## Representation
 
@@ -105,8 +105,8 @@ invalidates it. Empty results are not cached, so newly backfilled documents can 
 An incident without passages uses its overview score. Ties are ordered by incident ID.
 
 These helpers are backend-only. Piece 2 replaces submission/incident-form suggestions, and Piece 3
-replaces the spatial projection input. Legacy vector writers, persisted-neighbor refresh, and
-historical data remain unchanged for later pieces.
+replaces the spatial projection input. Piece 4 refreshes persisted machine-generated neighbors.
+Legacy vector writers and historical data remain unchanged until the final migration piece.
 
 ## Interactive suggestions (Piece 2)
 
@@ -176,6 +176,48 @@ child process against an ephemeral MongoDB, with the translations URI deliberate
 Tests in `spatialEmbeddings.spec.ts`, `spatialPage.spec.ts`, and the Chromium `spatialView.spec.ts`
 cover the projection, persistence, current-build page context, and rendering without remote access.
 
+## Stored incident neighbors (Piece 4)
+
+`refresh-incident-neighbors.ts` writes only `incidents.nlp_similar_incidents`, retaining its existing
+`[{incident_id, similarity}]` format for citation pages and the GraphQL API. Each source incident's
+normalized stored overview is compared with the complete compatible corpus using the shared
+65% overview / 35% best-passage ranking and 0.15 threshold. Self-matches are excluded before taking
+the top three, with incident-ID tie breaking. This is a directed, document-vector relationship,
+not a fresh provider-embedded text query, and it does not require symmetric neighbor lists.
+
+The job uses `MONGODB_CONNECTION_STRING`, requires read access to `incident_embeddings` and
+read/write access to `incidents`, and needs the same model, endpoint, profile, and chunk signature
+as ingestion. It makes no provider calls and needs no API key. Deleted incidents, incompatible
+documents, and malformed vectors are excluded. Mixed valid dimensions or an entirely incompatible
+corpus fail before writes. Incidents without compatible overviews retain their current lists and
+are reported as skipped. Valid incidents with no matching neighbors receive an empty list.
+
+Every successful full run recomputes all compatible incidents, including unchanged sources, because
+a changed/new candidate can affect other incidents' incoming rankings. Unchanged lists are not
+rewritten. Writes are awaited in batches of at most 100; interrupted or failed partial writes can
+be safely completed by rerunning. Editor-selected relations, dissimilarity decisions, flags, legacy
+vectors, spatial coordinates, dates, and history records are never changed by this job.
+
+From `site/gatsby-site`, preview or run against your configured database:
+
+```bash
+npm run refresh-incident-neighbors -- --limit 5 --dry-run
+npm run refresh-incident-neighbors -- --incident-id 39
+npm run refresh-incident-neighbors
+```
+
+`--limit N` limits the first N target incidents in ID order, not the candidate corpus.
+`--incident-id N` is repeatable, `--num N` overrides the default three, and `--dry-run` prevents all
+writes. Positive integer arguments are required. A limited run does not refresh incoming lists on
+unselected incidents; the next full nightly run does. The JSON summary reports target/corpus counts,
+skipped/unchanged/changed lists, actual writes, and dry-run status.
+
+The local `incidentNeighbors.spec.ts` suite exercises an isolated MongoDB, the real CLI, idempotence,
+bounded persistence, and the existing localized citation-page builder. `embeddingWorkflow.spec.ts`
+parses the checked-in workflow and checks its Bash commands offline. Neither accesses GitHub or
+any deployed environment. Existing site builds consume the refreshed lists; this job does not
+trigger or publish a new site build.
+
 ## Run locally
 
 Set these values in `site/gatsby-site/.env`:
@@ -208,6 +250,14 @@ second exits immediately.
 Run **Embed Incidents** manually and select a GitHub Environment. Start with `limit: 5` against a
 non-production database, inspect the stored documents, then run the full job. The workflow uses
 Node 22 and passes its typed inputs through environment variables and a Bash argument array.
+
+After successful ingestion, **Refresh stored incident neighbors** updates the machine-generated
+lists. Nightly runs refresh all compatible incidents even when ingestion skips unchanged sources.
+Manual runs default `refresh_neighbors` to true and apply the same target `limit` to both steps;
+set it to false for an embedding-only smoke run. The neighbor step receives the same index settings
+and database URI but no provider key. Failed, quota-exhausted, or cancelled ingestion skips the
+neighbor step; rerun with `resume` after resolving the failure. This local workflow change does not
+alter remote settings or verify staging.
 
 The selected environment needs:
 

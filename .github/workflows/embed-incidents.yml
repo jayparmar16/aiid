@@ -22,6 +22,11 @@ on:
         type: boolean
         default: false
         required: false
+      refresh_neighbors:
+        description: Refresh stored related incidents after successful embedding (same target limit)
+        type: boolean
+        default: true
+        required: false
 
 defaults:
   run:
@@ -80,6 +85,24 @@ jobs:
           EMBEDDING_BATCH_SIZE: ${{ vars.EMBEDDING_BATCH_SIZE || secrets.EMBEDDING_BATCH_SIZE }}
           RUN_LIMIT: ${{ inputs.limit }}
           RUN_RESUME: ${{ github.event_name == 'schedule' || inputs.resume }}
+
+      - name: Refresh stored incident neighbors
+        # Do not publish a partial refresh after failed/interrupted ingestion.
+        if: ${{ success() && (github.event_name == 'schedule' || inputs.refresh_neighbors) }}
+        run: |
+          args=()
+          if (( RUN_LIMIT > 0 )); then
+            args+=(--limit "$RUN_LIMIT")
+          fi
+          npm run refresh-incident-neighbors:ci -- "${args[@]}"
+        working-directory: site/gatsby-site
+        env:
+          MONGODB_CONNECTION_STRING: ${{ secrets.MONGODB_CONNECTION_STRING }}
+          EMBEDDING_API_BASE_URL: ${{ vars.EMBEDDING_API_BASE_URL || secrets.EMBEDDING_API_BASE_URL }}
+          EMBEDDING_MODEL: ${{ vars.EMBEDDING_MODEL || secrets.EMBEDDING_MODEL }}
+          EMBEDDING_MAX_INPUT_CHARS: ${{ vars.EMBEDDING_MAX_INPUT_CHARS || secrets.EMBEDDING_MAX_INPUT_CHARS }}
+          EMBEDDING_CHUNK_OVERLAP_CHARS: ${{ vars.EMBEDDING_CHUNK_OVERLAP_CHARS || secrets.EMBEDDING_CHUNK_OVERLAP_CHARS }}
+          RUN_LIMIT: ${{ inputs.limit }}
 
       # Uploaded even on failure, because that is when the manifest is worth reading.
       - name: Upload failure manifest

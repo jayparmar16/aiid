@@ -47,6 +47,36 @@ const dot = (left: Float32Array, right: Float32Array): number => {
   return score;
 };
 
+/** Readers share validation and normalization, whether dimensions come from a query or a row. */
+export const decodeIncidentVectors = (
+  document: {
+    [key: string]: unknown;
+    incident_id?: unknown;
+    dims?: unknown;
+    overview?: any;
+    passages?: any;
+  },
+  dimensions: unknown = document.dims
+): IncidentVectors | null => {
+  if (
+    typeof document.incident_id !== 'number' ||
+    !Number.isSafeInteger(document.incident_id) ||
+    document.incident_id <= 0 ||
+    typeof dimensions !== 'number' ||
+    !Number.isSafeInteger(dimensions) ||
+    dimensions <= 0
+  )
+    return null;
+  const overview = normaliseBinaryVector(document.overview?.vector, dimensions);
+  if (!overview) return null;
+  const passages = Array.isArray(document.passages)
+    ? document.passages
+        .map((passage: any) => normaliseBinaryVector(passage?.vector, dimensions))
+        .filter((vector: Float32Array | null): vector is Float32Array => vector !== null)
+    : [];
+  return { incidentId: document.incident_id, overview, passages };
+};
+
 /** Weighted overview and best-passage cosine similarity; absent passages use the overview. */
 export const rankIncidentVectors = (
   incidents: readonly IncidentVectors[],
@@ -116,15 +146,8 @@ export const createIncidentVectorLoader = () => {
     const incidents: IncidentVectors[] = [];
     try {
       for await (const document of cursor) {
-        if (!Number.isInteger(document.incident_id) || document.incident_id <= 0) continue;
-        const overview = normaliseBinaryVector(document.overview?.vector, dimensions);
-        if (!overview) continue;
-        const passages = Array.isArray(document.passages)
-          ? document.passages
-              .map((passage: any) => normaliseBinaryVector(passage?.vector, dimensions))
-              .filter((vector): vector is Float32Array => vector !== null)
-          : [];
-        incidents.push({ incidentId: document.incident_id, overview, passages });
+        const incident = decodeIncidentVectors(document, dimensions);
+        if (incident) incidents.push(incident);
       }
     } finally {
       await cursor.close();
