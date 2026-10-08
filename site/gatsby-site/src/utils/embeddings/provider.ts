@@ -130,6 +130,7 @@ export interface ProviderOptions {
   timeoutMs?: number;
   maxAttempts?: number;
   onRetry?: (message: string) => void;
+  signal?: AbortSignal;
 }
 
 /** Caller limits let interactive requests fail fast while ingestion keeps its retry defaults. */
@@ -167,6 +168,7 @@ export const createEmbeddingProvider = (options: ProviderOptions = {}): Embeddin
     let lastMessage = 'unknown error';
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      options.signal?.throwIfAborted();
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       const startedAt = Date.now();
@@ -179,7 +181,9 @@ export const createEmbeddingProvider = (options: ProviderOptions = {}): Embeddin
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({ model, input: texts, ...profile.requestOptions(purpose) }),
-          signal: controller.signal,
+          signal: options.signal
+            ? AbortSignal.any([controller.signal, options.signal])
+            : controller.signal,
         });
         const latencyMs = Date.now() - startedAt;
 
@@ -223,6 +227,7 @@ export const createEmbeddingProvider = (options: ProviderOptions = {}): Embeddin
           await sleep(waitMs);
         }
       } catch (e: any) {
+        if (options.signal?.aborted) throw e;
         if (e instanceof EmbeddingRequestError) throw e;
 
         lastMessage =

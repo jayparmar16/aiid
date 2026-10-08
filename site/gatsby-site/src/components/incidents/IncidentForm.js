@@ -343,6 +343,8 @@ function IncidentForm({ entityNames = [], isNewIncident = false }) {
             incident={values}
             setFieldValue={setFieldValue}
             editId={false}
+            useIncidentOverview
+            excludeIncidentId={isNewIncident ? undefined : values.incident_id}
           />
         </div>
 

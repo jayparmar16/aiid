@@ -58,6 +58,28 @@ describe('embedding provider profiles and validation', () => {
     global.fetch = originalFetch;
   });
 
+  it('does not send requests when the caller has already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    global.fetch = jest.fn();
+    await expect(
+      createEmbeddingProvider({ signal: controller.signal, maxAttempts: 6 }).embed(['query'])
+    ).rejects.toThrow();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it('does not retry a request cancelled by the caller', async () => {
+    const controller = new AbortController();
+    global.fetch = jest.fn().mockImplementation(async () => {
+      controller.abort();
+      throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+    });
+    await expect(
+      createEmbeddingProvider({ signal: controller.signal, maxAttempts: 6 }).embed(['query'])
+    ).rejects.toThrow('aborted');
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
   it('adds input_type only for the Nemotron profile', async () => {
     process.env.EMBEDDING_MODEL = 'nvidia/nemotron-3-embed-1b:free';
     const fetchMock = jest.fn().mockResolvedValue(

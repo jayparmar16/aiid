@@ -1,7 +1,8 @@
 # Incident Embeddings
 
 This pipeline prepares incident data for semantic retrieval. It writes one document per incident
-to `aiidprod.incident_embeddings`; query and UI changes are deliberately outside this pipeline.
+to `aiidprod.incident_embeddings`. Interactive suggestions now read this representation; the
+spatial view and persisted-neighbor refresh are separate migration pieces.
 
 ## Representation
 
@@ -75,12 +76,12 @@ POST {baseUrl}/embeddings  {model, input}
 ```
 
 The model name selects an optional local request profile. The Nemotron embedding profile adds
-`input_type: passage` for pipeline inputs (and supports `query` for a future query caller).
+`input_type: passage` for pipeline inputs and `query` for interactive suggestions.
 Unrecognized models add no vendor-specific fields, so switching an OpenAI-compatible model normally
 requires only changing `EMBEDDING_MODEL` and, if necessary, `EMBEDDING_API_BASE_URL`.
 
-`createEmbeddingProvider({timeoutMs, maxAttempts, onRetry})` supports caller limits for future
-interactive consumers. Without overrides, ingestion retains its existing timeout and retry
+`createEmbeddingProvider({timeoutMs, maxAttempts, onRetry, signal})` supports caller limits and
+cancellation for interactive consumers. Without overrides, ingestion retains its timeout and retry
 defaults. Retry messages are opt-in; the ingestion CLI supplies a warning callback.
 
 Provider responses are rejected if indices are missing or duplicated, dimensions differ, or a
@@ -103,9 +104,41 @@ invalidates it. Empty results are not cached, so newly backfilled documents can 
 65% overview cosine similarity and 35% best-passage similarity, with a default minimum of 0.15.
 An incident without passages uses its overview score. Ties are ordered by incident ID.
 
-These helpers are backend-only. Piece 1 of the Longformer replacement does not connect them to
-existing consumers: submission suggestions, stored relations, and the spatial view retain their
-current behavior until their respective migration pieces.
+These helpers are backend-only. Piece 2 replaces submission/incident-form suggestions; the spatial
+view, legacy vector writers, and existing historical data remain unchanged for later pieces.
+
+## Interactive suggestions (Piece 2)
+
+`POST /api/semanticallyRelated` accepts non-empty `text`, optional `num` (default 3; zero also
+means 3; negative means all matches), and optional positive `excludeIncidentId`. The compatibility
+option `includeSimilar: false` returns an empty list without contacting dependencies.
+`max_retries` is accepted but ignored.
+
+Input is chunked using the same bounds and overlap as ingestion; no long-text tail is truncated.
+Each incident's score is the maximum weighted score across all query chunks. The endpoint returns
+`{embedding: null, incidents: [{incident_id, similarity}]}` and never produces a legacy Longformer
+vector. Deleted incident IDs are filtered even when their vectors remain in the warm cache.
+
+Provider requests have one attempt and an 8-second timeout; the complete operation has a
+60-second deadline. Invalid requests return 400, provider quota exhaustion returns 429, and
+unavailable configuration, provider, MongoDB, or a compatible corpus returns 503. Missing compatible
+vectors are not silently replaced with a legacy model. An unrelated query returns 200 with no hits.
+
+Configure `EMBEDDING_API_KEY` only in the server environment. Runtime also needs
+`API_MONGODB_CONNECTION_STRING` with read access to `aiidprod.incidents` and
+`aiidprod.incident_embeddings`. Runtime model, endpoint, profile, and chunk settings must match the
+ingestion job and its backfilled corpus. Interactive timeout/retry limits override ingestion's
+`EMBEDDING_TIMEOUT_MS` / `EMBEDDING_MAX_ATTEMPTS`. A compatible backfill is a deployment prerequisite;
+these local changes do not configure or verify a remote environment.
+
+The UI debounces changes, cancels obsolete work, refreshes rather than reusing saved suggestions,
+and saves only `nlp_similar_incidents`, never `embedding`. Report input needs 256 non-whitespace
+characters after markdown stripping. Incident forms can use the shorter title/description overview
+and exclude the incident being edited.
+
+Local tests in `server/tests/semanticallyRelated.spec.ts` use isolated MongoDB and a fake provider;
+`playwright/e2e/unit/semanticallyRelated.spec.ts` runs the actual React component with mocked service
+boundaries in Chromium. Neither suite contacts a remote deployment.
 
 The isolated CLI smoke test (`server/tests/embeddingPipeline.spec.ts`) embeds five seeded incidents
 against a temporary MongoDB and local test provider, checks bounded batches and compact vectors,

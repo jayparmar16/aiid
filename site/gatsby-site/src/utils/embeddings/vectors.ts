@@ -91,8 +91,10 @@ export const createIncidentVectorLoader = () => {
     client: MongoClient,
     index: EmbeddingIndexConfig,
     dimensions: number,
-    databaseName = 'aiidprod'
+    databaseName = 'aiidprod',
+    signal?: AbortSignal
   ): Promise<IncidentVectors[]> => {
+    signal?.throwIfAborted();
     if (!Number.isInteger(dimensions) || dimensions <= 0) {
       throw new Error('dimensions must be a positive integer');
     }
@@ -115,6 +117,7 @@ export const createIncidentVectorLoader = () => {
       .collection(EMBEDDINGS_COLLECTION)
       .find(filter, {
         projection: { _id: 0, incident_id: 1, 'overview.vector': 1, 'passages.vector': 1 },
+        signal,
       })
       .sort({ incident_id: 1 });
     const incidents: IncidentVectors[] = [];
