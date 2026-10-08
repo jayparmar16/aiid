@@ -14,7 +14,7 @@ const component = transformSync(source, {
 })!.code!;
 const article = 'Report details '.repeat(30);
 
-async function mount(page: Page, props: Record<string, unknown>) {
+async function mount(page: Page, props: Record<string, unknown>, { expectLoading = true } = {}) {
   await page.route('**/*', (route) =>
     route.fulfill({ contentType: 'text/html', body: '<div id="root"></div>' })
   );
@@ -83,15 +83,18 @@ async function mount(page: Page, props: Record<string, unknown>) {
         module.exports
       );
       const root = w.ReactDOM.createRoot(document.getElementById('root'));
+      // Synchronous renders also flush effects, so a test can rely on the new input being applied.
       w.renderSuggestions = (next: any) =>
-        root.render(
-          React.createElement(module.exports.default, { ...next, setFieldValue: w.setFieldValue })
+        w.ReactDOM.flushSync(() =>
+          root.render(
+            React.createElement(module.exports.default, { ...next, setFieldValue: w.setFieldValue })
+          )
         );
       w.renderSuggestions(initial);
     },
     { code: component, overview: buildIncidentOverview.toString(), initial: props }
   );
-  await expect(page.getByTestId('status')).toHaveText('loading');
+  if (expectLoading) await expect(page.getByTestId('status')).toHaveText('loading');
 }
 
 async function settle(page: Page) {
@@ -99,17 +102,68 @@ async function settle(page: Page) {
   await expect(page.getByTestId('status')).toHaveText('idle');
 }
 
-test('fetches fresh ranked suggestions, ignoring saved legacy values and never assigning embedding', async ({
-  page,
-}) => {
-  await mount(page, {
-    incident: { text: article, nlp_similar_incidents: [{ incident_id: 99 }], embedding: [1] },
-  });
+test('fetches fresh ranked suggestions and never assigns an embedding', async ({ page }) => {
+  await mount(page, { incident: { text: article, embedding: [1] } });
   await settle(page);
   await expect(page.getByTestId('hit')).toHaveText(['Incident 1', 'Incident 2']);
   const fields = await page.evaluate(() => (window as any).fields);
   expect(fields.every((field: any) => field.name === 'nlp_similar_incidents')).toBe(true);
   expect(fields[fields.length - 1].value.map((row: any) => row.incident_id)).toEqual([1, 2]);
+});
+
+test('shows saved neighbors without a request until the text changes', async ({ page }) => {
+  await mount(
+    page,
+    {
+      incident: {
+        text: article,
+        nlp_similar_incidents: [
+          { incident_id: 99, similarity: 0.5, __typename: 'IncidentNlp_similar_incident' },
+          { incident_id: 98, similarity: 0.6, __typename: 'IncidentNlp_similar_incident' },
+        ],
+      },
+    },
+    { expectLoading: false }
+  );
+  await expect(page.getByTestId('hit')).toHaveText(['Incident 98', 'Incident 99']);
+  await page.clock.runFor(2100);
+  expect(await page.evaluate(() => (window as any).requests.length)).toBe(0);
+  // Saved values go back into the form without GraphQL type names, which inputs reject.
+  expect(await page.evaluate(() => (window as any).fields.slice(-1)[0].value)).toEqual([
+    { incident_id: 98, similarity: 0.6 },
+    { incident_id: 99, similarity: 0.5 },
+  ]);
+
+  await page.evaluate(
+    (text) => (window as any).renderSuggestions({ incident: { text } }),
+    `New ${article}`
+  );
+  await settle(page);
+  await expect(page.getByTestId('hit')).toHaveText(['Incident 1', 'Incident 2']);
+
+  // Returning to the original text recomputes; the saved list is not reused once edited.
+  await page.evaluate((text) => (window as any).renderSuggestions({ incident: { text } }), article);
+  await settle(page);
+  expect(await page.evaluate(() => (window as any).requests.length)).toBe(2);
+});
+
+test('keeps saved neighbors in the form when a recomputation fails', async ({ page }) => {
+  const saved = [{ incident_id: 99, similarity: 0.5 }];
+  await mount(
+    page,
+    { incident: { text: article, nlp_similar_incidents: saved } },
+    { expectLoading: false }
+  );
+  await expect(page.getByTestId('hit')).toHaveText(['Incident 99']);
+  await page.evaluate((text) => {
+    const w = window as any;
+    w.fetch = async () => ({ ok: false, status: 429 });
+    w.renderSuggestions({ incident: { text, nlp_similar_incidents: [] } });
+  }, `New ${article}`);
+  await settle(page);
+  await expect(page.getByTestId('error')).toHaveText('Could not compute semantic similarity');
+  const values = await page.evaluate(() => (window as any).fields.map((field: any) => field.value));
+  expect(values).toEqual([saved, saved]);
 });
 
 test('requires 256 non-whitespace report characters and clears suggestions on empty text', async ({
@@ -157,8 +211,7 @@ test('cancels an obsolete debounce before making a request', async ({ page }) =>
     (text) => (window as any).renderSuggestions({ incident: { text } }),
     `New ${article}`
   );
-  // Wait for the changed input's effect without advancing the debounce clock.
-  await expect.poll(() => page.evaluate(() => (window as any).fields.length)).toBe(2);
+  // renderSuggestions flushes the changed input's effect before the debounce clock advances.
   await settle(page);
   expect(await page.evaluate(() => (window as any).requests.map((row: any) => row.text))).toEqual([
     `New ${article}`,
@@ -209,6 +262,7 @@ test('handles unavailable providers, empty matches, and database errors without 
   });
   await settle(page);
   await expect(page.getByTestId('error')).toHaveText('Could not compute semantic similarity');
+  expect(await page.evaluate(() => (window as any).fields.length)).toBe(0);
   await page.evaluate((text) => {
     const w = window as any;
     w.fetch = async () => ({ ok: true, json: async () => ({ incidents: [] }) });
@@ -218,6 +272,8 @@ test('handles unavailable providers, empty matches, and database errors without 
   await settle(page);
   await expect(page.getByTestId('hit')).toHaveCount(0);
   await expect(page.getByTestId('error')).toBeEmpty();
+  // A successful empty result is a real answer, so it does replace the form value.
+  expect(await page.evaluate(() => (window as any).fields.slice(-1)[0].value)).toEqual([]);
   await page.evaluate((text) => {
     const w = window as any;
     w.fetch = async () => ({

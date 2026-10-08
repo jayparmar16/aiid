@@ -233,7 +233,7 @@ describe('schema-v2 spatial projection', () => {
     expect(close).toHaveBeenCalledTimes(2);
   });
 
-  it('loads through the real Gatsby CommonJS bridge, uses the source database, and exits cleanly', async () => {
+  it('loads through the real Gatsby CommonJS bridge, uses the writable build connection, and exits cleanly', async () => {
     const { stdout } = await execute(
       process.execPath,
       [
@@ -248,8 +248,8 @@ describe('schema-v2 spatial projection', () => {
           PATH: process.env.PATH,
           GATSBY_SITE_URL: 'http://localhost',
           GATSBY_AVAILABLE_LANGUAGES: 'en',
-          MONGODB_CONNECTION_STRING: mongo.getUri(),
-          MONGODB_TRANSLATIONS_CONNECTION_STRING: 'mongodb://127.0.0.1:1',
+          MONGODB_CONNECTION_STRING: 'mongodb://127.0.0.1:1',
+          MONGODB_TRANSLATIONS_CONNECTION_STRING: mongo.getUri(),
           EMBEDDING_MODEL: 'vendor/spatial-test',
           EMBEDDING_API_BASE_URL: 'https://embedding.test/v1/',
           EMBEDDING_MAX_INPUT_CHARS: '100',

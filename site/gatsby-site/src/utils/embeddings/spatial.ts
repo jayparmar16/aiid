@@ -121,7 +121,7 @@ export const updateTsneInDatabase = async (
   databaseName = 'aiidprod'
 ): Promise<SpatialIncident[]> => {
   if (!connectionString)
-    throw new Error('MONGODB_CONNECTION_STRING is required for the spatial build');
+    throw new Error('MONGODB_TRANSLATIONS_CONNECTION_STRING is required for the spatial build');
   const client = new MongoClient(connectionString, { serverSelectionTimeoutMS: 5000 });
   try {
     await client.connect();

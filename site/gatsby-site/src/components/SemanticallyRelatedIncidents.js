@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { gql, useApolloClient } from '@apollo/client';
 import debounce from 'lodash/debounce';
 import RelatedIncidentsArea from './RelatedIncidentsArea';
@@ -36,6 +36,19 @@ const SemanticallyRelatedIncidents = ({
 
   const text = usingOverview ? buildIncidentOverview(incident || {}) : incident?.text || '';
 
+  // Saved neighbors are shown for the text they were computed from, without a provider call.
+  // Once the text changes they are recomputed, and never reused again.
+  const initialText = useRef(text);
+
+  const savedNeighbors = useRef(
+    incident?.nlp_similar_incidents?.length > 0
+      ? incident.nlp_similar_incidents.map(({ incident_id, similarity }) => ({
+          incident_id,
+          similarity,
+        }))
+      : null
+  );
+
   useEffect(() => {
     const controller = new AbortController();
 
@@ -43,49 +56,67 @@ const SemanticallyRelatedIncidents = ({
 
     let timer;
 
+    if (text !== initialText.current) savedNeighbors.current = null;
+
+    const saved = text.trim() ? savedNeighbors.current : null;
+
     setIncidents([]);
     setError(null);
     setLoading(Boolean(text.trim()));
-    if (setFieldValue) setFieldValue('nlp_similar_incidents', []);
 
-    const update = debounce(async () => {
+    // The form keeps its current neighbors until a request succeeds, so saving during
+    // the debounce or while the provider is unavailable cannot erase them.
+    if (setFieldValue && saved) setFieldValue('nlp_similar_incidents', saved);
+    if (setFieldValue && !text.trim()) setFieldValue('nlp_similar_incidents', []);
+
+    const load = async () => {
       let errorMessage = t('Could not compute semantic similarity');
 
       try {
-        const plaintext = await stripMarkdown(text);
+        let related = saved;
 
-        if (!active) return;
-        const minLength = 256;
+        if (!related) {
+          const plaintext = await stripMarkdown(text);
 
-        if (!usingOverview && plaintext.replace(/\s/g, '').length < minLength) {
-          setError(
-            t(
-              'Reports must have at least {{minLength}} non-space characters to compute semantic similarity.',
-              { minLength }
-            )
-          );
-          return;
+          if (!active) return;
+          const minLength = 256;
+
+          if (!usingOverview && plaintext.replace(/\s/g, '').length < minLength) {
+            setError(
+              t(
+                'Reports must have at least {{minLength}} non-space characters to compute semantic similarity.',
+                { minLength }
+              )
+            );
+            if (setFieldValue) setFieldValue('nlp_similar_incidents', []);
+            return;
+          }
+
+          timer = setTimeout(() => controller.abort(), 66000);
+          const response = await fetch('/api/semanticallyRelated', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: plaintext, excludeIncidentId }),
+            signal: controller.signal,
+          });
+
+          if (!response.ok) throw new Error('Semantic relation error');
+          const result = await response.json();
+
+          if (!active) return;
+          related = result.incidents;
         }
 
-        timer = setTimeout(() => controller.abort(), 66000);
-        const response = await fetch('/api/semanticallyRelated', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: plaintext, excludeIncidentId }),
-          signal: controller.signal,
-        });
-
-        if (!response.ok) throw new Error('Semantic relation error');
-        const result = await response.json();
-
-        if (!active) return;
-        const related = [...result.incidents].sort(
-          (left, right) => right.similarity - left.similarity
+        related = [...related].sort(
+          (left, right) => (right.similarity ?? 0) - (left.similarity ?? 0)
         );
 
         const ids = related.map((item) => item.incident_id);
 
-        if (ids.length === 0) return;
+        if (ids.length === 0) {
+          if (setFieldValue) setFieldValue('nlp_similar_incidents', []);
+          return;
+        }
         errorMessage = t('Could not retrieve related incidents from database');
         const { data } = await client.query({
           query: relatedIncidentIdsQuery,
@@ -108,9 +139,12 @@ const SemanticallyRelatedIncidents = ({
         clearTimeout(timer);
         if (active) setLoading(false);
       }
-    }, 2000);
+    };
 
-    if (text.trim()) update();
+    const update = debounce(load, 2000);
+
+    if (saved) load();
+    else if (text.trim()) update();
     return () => {
       active = false;
       update.cancel();

@@ -154,8 +154,10 @@ legacy `incidents.embedding.vector` are never used. The shared index filter requ
 schema, model, endpoint, profile, and chunk signature. Malformed vectors and deleted incidents are
 skipped; mixed valid dimensions fail before coordinate writes.
 
-This build needs `MONGODB_CONNECTION_STRING` with read access to `incident_embeddings` and read/write
-access to `incidents` in the source database, not the translations database. It uses the same
+This build connects through `MONGODB_TRANSLATIONS_CONNECTION_STRING`, the connection production
+builds have always used to write `incidents.tsne`. The Gatsby source connection
+(`MONGODB_CONNECTION_STRING`) is not assumed to be writable. That connection needs read access to
+`aiidprod.incident_embeddings` and read/write access to `aiidprod.incidents`. It uses the same
 `EMBEDDING_MODEL`, endpoint, and chunk configuration as ingestion, but requires no embedding API key
 and makes no provider calls. `TSNE_NITER` defaults to 1000 and must be a positive integer.
 
@@ -172,7 +174,7 @@ to an incident not present in the current projection shows the available plot wi
 
 The CommonJS Gatsby hook temporarily registers the existing `tsx` loader to import shared
 TypeScript helpers and immediately unregisters it. The local bridge smoke test runs a plain Node
-child process against an ephemeral MongoDB, with the translations URI deliberately unavailable.
+child process against an ephemeral MongoDB, with the Gatsby source URI deliberately unavailable.
 Tests in `spatialEmbeddings.spec.ts`, `spatialPage.spec.ts`, and the Chromium `spatialView.spec.ts`
 cover the projection, persistence, current-build page context, and rendering without remote access.
 

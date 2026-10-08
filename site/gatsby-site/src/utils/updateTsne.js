@@ -14,7 +14,12 @@ try {
   unregister();
 }
 
+// Production builds have always written incidents.tsne through this connection; the Gatsby
+// source connection is not assumed to have write access.
 const updateTsneInDatabase = () =>
-  spatial.updateTsneInDatabase(config.mongodb.connectionString, config.realm.production_db.db_name);
+  spatial.updateTsneInDatabase(
+    config.mongodb.translationsConnectionString,
+    config.realm.production_db.db_name
+  );
 
 module.exports = { updateTsneInDatabase };
